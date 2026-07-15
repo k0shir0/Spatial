@@ -370,6 +370,14 @@ def fuse_tsdf(
         depth_map = np.asarray(depths[i], dtype=np.float32)
         height, width = depth_map.shape[:2]
         conf = float(view.get("depth_conf", 1.0))
+        confidence_map = view.get("depth_confidence_map")
+        if confidence_map is not None:
+            confidence_map = np.asarray(confidence_map, dtype=np.float32)
+            if confidence_map.shape != depth_map.shape:
+                raise ValueError(
+                    f"depth confidence shape {confidence_map.shape} does not match "
+                    f"depth shape {depth_map.shape} for {view['name']}"
+                )
         edges = _edge_mask(depth_map, extent, edge_grad_thresh)
 
         u, v, voxel_depth = project_points(
@@ -396,7 +404,13 @@ def fuse_tsdf(
         if not keep.any():
             continue
         sdf_clipped = np.clip(sdf, -1.0, 1.0)
-        weight = conf / np.maximum(voxel_depth, 1e-6)
+        if confidence_map is None:
+            sample_confidence = np.full(n_band, conf, dtype=np.float64)
+        else:
+            sample_confidence = np.zeros(n_band, dtype=np.float64)
+            sample_confidence[inside] = confidence_map[vi[inside], ui[inside]]
+            sample_confidence *= conf
+        weight = sample_confidence / np.maximum(voxel_depth, 1e-6)
         tsdf_sum[keep] += weight[keep] * sdf_clipped[keep]
         weight_sum[keep] += weight[keep]
 
@@ -448,10 +462,15 @@ def extract_mesh(
 
     observed = weight >= float(min_weight)
     occupied_count = int(occ.sum())
+    supported_fraction = float(
+        np.count_nonzero(observed & occ) / max(occupied_count, 1)
+    )
     report = {
-        "observed_voxel_fraction": float(
-            np.count_nonzero(observed & occ) / max(occupied_count, 1)
-        ),
+        # Legacy key retained for report compatibility. This support comes from
+        # a monocular prediction aligned to sparse SfM, not measured depth.
+        "observed_voxel_fraction": supported_fraction,
+        "predicted_depth_supported_voxel_fraction": supported_fraction,
+        "support_semantics": "monocular predicted depth aligned to sparse SfM; not sensor-measured geometry",
         "observed_band_voxels": int(np.count_nonzero(observed)),
         "occupied_voxels": occupied_count,
         "vertices": int(len(vertices)),
@@ -470,6 +489,8 @@ def reconstruct_geometry(
     resolution: int = 256,
     target_triangles: int = 20000,
     depth_threads: int = 4,
+    intersect_point_hull: bool = True,
+    use_precomputed_depths: bool = False,
 ) -> dict:
     """Orchestrate hull carving + optional monocular-depth TSDF fusion.
 
@@ -501,7 +522,7 @@ def reconstruct_geometry(
     occupancy, carve_report = carve_hull(
         silhouette_views, intrinsics, bounds, resolution=resolution
     )
-    if points_xyz is not None and len(np.asarray(points_xyz)) >= 8:
+    if intersect_point_hull and points_xyz is not None and len(np.asarray(points_xyz)) >= 8:
         try:
             point_bound = point_hull_occupancy(points_xyz, bounds, resolution)
             before = int(occupancy.sum())
@@ -512,6 +533,10 @@ def reconstruct_geometry(
             }
         except Exception as exc:  # hull degenerate -> keep silhouette-only
             carve_report["point_hull_intersection"] = {"skipped": str(exc)}
+    elif points_xyz is not None and len(np.asarray(points_xyz)) >= 8:
+        carve_report["point_hull_intersection"] = {
+            "skipped": "disabled: sparse points constrain bounds but are not a hard surface hull",
+        }
 
     report: dict[str, Any] = {
         "bounds_source": bounds_source,
@@ -521,7 +546,19 @@ def reconstruct_geometry(
     }
 
     fused = False
-    can_fuse = depth_model_path is not None and points_xyz is not None
+    precomputed_views = (
+        [
+            view
+            for view in views
+            if view.get("depth_map") is not None
+            and view.get("evaluation_role", "reconstruction") != "holdout"
+        ]
+        if use_precomputed_depths
+        else []
+    )
+    can_fuse = bool(precomputed_views) or (
+        depth_model_path is not None and points_xyz is not None
+    )
     if can_fuse and occupancy.any():
         from local3d.monodepth import (
             DepthEstimator,
@@ -529,42 +566,79 @@ def reconstruct_geometry(
             disparity_to_depth,
         )
 
-        estimator = DepthEstimator(depth_model_path, threads=depth_threads)
-        points = np.asarray(points_xyz, dtype=np.float64).reshape(-1, 3)
         fusion_views: list[dict] = []
         fusion_depths: list[np.ndarray] = []
         alignments: list[dict] = []
-        for view in sorted(views, key=lambda item: item["name"]):
-            image = cv2.imread(str(view["image_path"]), cv2.IMREAD_COLOR)
-            if image is None:
-                report["depth_frames_rejected"] += 1
-                continue
-            u, v, depth = project_points(
-                points, view["rotation"], view["translation"], intrinsics
+        if precomputed_views:
+            for view in sorted(precomputed_views, key=lambda item: item["name"]):
+                metric = np.asarray(view["depth_map"], dtype=np.float32)
+                if metric.ndim != 2 or not np.any(np.isfinite(metric) & (metric > 0)):
+                    report["depth_frames_rejected"] += 1
+                    continue
+                masked = np.where(np.isfinite(metric) & (metric > 0), metric, 0.0)
+                if view.get("mask_tight") is not None:
+                    masked = masked * (np.asarray(view["mask_tight"]) > 0)
+                fused_view = dict(view)
+                fused_view.setdefault("depth_conf", 1.0)
+                fusion_views.append(fused_view)
+                fusion_depths.append(masked.astype(np.float32))
+            report["depth_source"] = "precomputed evidence-gated aligned maps"
+            report["depth_backend"] = sorted(
+                {
+                    str(view.get("depth_backend", "unknown"))
+                    for view in fusion_views
+                }
             )
-            height, width = image.shape[:2]
-            eroded = view.get("mask_eroded")
-            keep = (depth > 1e-6) & (u >= 0) & (u < width) & (v >= 0) & (v < height)
-            if eroded is not None:
-                eroded = np.asarray(eroded) > 0
-                ui = np.clip(np.rint(u), 0, width - 1).astype(np.int64)
-                vi = np.clip(np.rint(v), 0, height - 1).astype(np.int64)
-                on_object = np.zeros(len(points), dtype=bool)
-                on_object[keep] = eroded[vi[keep], ui[keep]]
-                keep = keep & on_object
-            disp = estimator.disparity(image)
-            alignment = align_disparity_to_points(disp, u[keep], v[keep], depth[keep])
-            if not alignment["ok"]:
-                report["depth_frames_rejected"] += 1
-                continue
-            metric = disparity_to_depth(disp, alignment["a"], alignment["b"])
-            if view.get("mask_tight") is not None:
-                metric = metric * (np.asarray(view["mask_tight"]) > 0)
-            fused_view = dict(view)
-            fused_view.setdefault("depth_conf", 1.0)
-            fusion_views.append(fused_view)
-            fusion_depths.append(metric.astype(np.float32))
-            alignments.append(alignment)
+        else:
+            estimator = DepthEstimator(depth_model_path, threads=depth_threads)
+            points = np.asarray(points_xyz, dtype=np.float64).reshape(-1, 3)
+            for view in sorted(views, key=lambda item: item["name"]):
+                image = cv2.imread(str(view["image_path"]), cv2.IMREAD_COLOR)
+                if image is None:
+                    report["depth_frames_rejected"] += 1
+                    continue
+                observations = view.get("sfm_observations")
+                if observations is not None:
+                    u = np.asarray(observations.get("xy", []), dtype=np.float64).reshape(-1, 2)[:, 0]
+                    v = np.asarray(observations.get("xy", []), dtype=np.float64).reshape(-1, 2)[:, 1]
+                    depth = np.asarray(observations.get("z_camera", []), dtype=np.float64)
+                else:
+                    # Compatibility only. New SfM results always carry actual
+                    # per-image track observations; global projection is not
+                    # independent visibility evidence.
+                    u, v, depth = project_points(
+                        points, view["rotation"], view["translation"], intrinsics
+                    )
+                height, width = image.shape[:2]
+                eroded = view.get("mask_eroded")
+                keep = (depth > 1e-6) & (u >= 0) & (u < width) & (v >= 0) & (v < height)
+                if eroded is not None:
+                    eroded = np.asarray(eroded) > 0
+                    ui = np.clip(np.rint(u), 0, width - 1).astype(np.int64)
+                    vi = np.clip(np.rint(v), 0, height - 1).astype(np.int64)
+                    on_object = np.zeros(len(depth), dtype=bool)
+                    on_object[keep] = eroded[vi[keep], ui[keep]]
+                    keep = keep & on_object
+                disp = estimator.disparity(image)
+                alignment = align_disparity_to_points(disp, u[keep], v[keep], depth[keep])
+                if not alignment["ok"]:
+                    report["depth_frames_rejected"] += 1
+                    continue
+                metric = disparity_to_depth(disp, alignment["a"], alignment["b"])
+                if view.get("mask_tight") is not None:
+                    metric = metric * (np.asarray(view["mask_tight"]) > 0)
+                fused_view = dict(view)
+                fused_view.setdefault("depth_conf", 1.0)
+                # Preserve the aligned map for the independent delivery gate.
+                view["depth_map"] = metric.astype(np.float32)
+                view["depth_backend"] = "depth_anything_legacy"
+                fusion_views.append(fused_view)
+                fusion_depths.append(metric.astype(np.float32))
+                alignments.append(alignment)
+            report["depth_source"] = (
+                "legacy per-frame Depth Anything alignment; actual image-track "
+                "observations used when available"
+            )
 
         report["depth_frames_used"] = len(fusion_views)
         if fusion_views:

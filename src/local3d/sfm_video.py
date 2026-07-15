@@ -285,6 +285,45 @@ def _rec_mean_error(rec: Any) -> float:
     return value
 
 
+def camera_coverage(views: list[dict[str, Any]], points_xyz: np.ndarray) -> dict[str, Any]:
+    """Measure object-centric angular support of a coherent SfM sub-model."""
+
+    if len(views) < 2 or len(points_xyz) < 2:
+        return {"azimuth_span_deg": 0.0, "occupied_30deg_bins": 0, "elevation_span_deg": 0.0}
+    object_center = np.median(np.asarray(points_xyz, dtype=np.float64), axis=0)
+    centers = np.stack([
+        -np.asarray(view["rotation"], dtype=np.float64).T
+        @ np.asarray(view["translation"], dtype=np.float64)
+        for view in views
+    ])
+    directions = centers - object_center
+    norms = np.linalg.norm(directions, axis=1)
+    directions = directions[norms > 1e-9]
+    norms = norms[norms > 1e-9]
+    if len(directions) < 2:
+        return {"azimuth_span_deg": 0.0, "occupied_30deg_bins": 0, "elevation_span_deg": 0.0}
+    directions = directions / norms[:, None]
+    _u, _s, vh = np.linalg.svd(
+        directions - directions.mean(axis=0), full_matrices=False
+    )
+    axis_u, axis_v = vh[0], vh[1]
+    normal = np.cross(axis_u, axis_v)
+    normal /= max(float(np.linalg.norm(normal)), 1e-12)
+    azimuth = np.mod(
+        np.degrees(np.arctan2(directions @ axis_v, directions @ axis_u)), 360.0
+    )
+    ordered = np.sort(azimuth)
+    gaps = np.diff(np.concatenate((ordered, ordered[:1] + 360.0)))
+    span = 360.0 - float(gaps.max())
+    bins = len(set(int(value // 30.0) % 12 for value in azimuth))
+    elevation = np.degrees(np.arcsin(np.clip(directions @ normal, -1.0, 1.0)))
+    return {
+        "azimuth_span_deg": round(span, 4),
+        "occupied_30deg_bins": int(bins),
+        "elevation_span_deg": round(float(np.ptp(elevation)), 4),
+    }
+
+
 def _build_views(rec: Any, frames_dir: Path) -> list[dict[str, Any]]:
     frames_dir = Path(frames_dir)
     views: list[tuple[str, dict[str, Any]]] = []
@@ -316,22 +355,115 @@ def _intrinsics(rec: Any) -> Intrinsics:
     return (focal, cx, cy, k1)
 
 
-def _points_xyz(rec: Any, *, min_track_length: int = 3) -> np.ndarray:
-    points: list[np.ndarray] = []
+def _filtered_point_records(
+    rec: Any, *, min_track_length: int = 3
+) -> list[tuple[int, Any, np.ndarray]]:
+    """Return deterministic object-point records after the positional filter.
+
+    Keeping the COLMAP point id and ``Point3D`` object beside ``xyz`` is
+    essential for honest depth validation: a depth prediction for one image
+    may only be calibrated against tracks that COLMAP actually observed in
+    that image.  The previous ``_points_xyz`` helper discarded this identity
+    and downstream code projected every global point into every camera,
+    including occluded/rear points.
+    """
+
+    records: list[tuple[int, Any, np.ndarray]] = []
     for point_id in sorted(rec.points3D.keys()):
         point = rec.points3D[point_id]
         if point.track.length() >= min_track_length:
-            points.append(np.asarray(point.xyz, dtype=np.float64).reshape(3))
-    if not points:
-        return np.zeros((0, 3), dtype=np.float64)
-    array = np.asarray(points, dtype=np.float64)
+            records.append(
+                (
+                    int(point_id),
+                    point,
+                    np.asarray(point.xyz, dtype=np.float64).reshape(3),
+                )
+            )
+    if not records:
+        return []
+    array = np.asarray([record[2] for record in records], dtype=np.float64)
     # Drop the positional outlier shell (background/hand leakage): keep points
     # within 3x the 75th-percentile radius of the median center, so downstream
     # bounds are sized by the object, not by stray tracks.
     center = np.median(array, axis=0)
     radius = np.linalg.norm(array - center, axis=1)
     keep = radius <= 3.0 * max(float(np.percentile(radius, 75)), 1e-9)
-    return array[keep]
+    return [record for record, retained in zip(records, keep) if bool(retained)]
+
+
+def _points_xyz(rec: Any, *, min_track_length: int = 3) -> np.ndarray:
+    records = _filtered_point_records(rec, min_track_length=min_track_length)
+    if not records:
+        return np.zeros((0, 3), dtype=np.float64)
+    return np.asarray([record[2] for record in records], dtype=np.float64)
+
+
+def _track_evidence(
+    rec: Any,
+    views: list[dict[str, Any]],
+    *,
+    min_track_length: int = 3,
+) -> dict[str, Any]:
+    """Extract actual per-image sparse observations for depth calibration.
+
+    Arrays are ordered by ``point3d_id`` and contain only observations from
+    the coherent delivery views.  This structure stays out of JSON reports;
+    callers persist only aggregate metrics and hashes.
+    """
+
+    records = _filtered_point_records(rec, min_track_length=min_track_length)
+    view_by_name = {str(view["name"]): view for view in views}
+    observations: dict[str, list[tuple[int, np.ndarray, np.ndarray, float, int, float]]] = {
+        name: [] for name in sorted(view_by_name)
+    }
+    point_ids: list[int] = []
+    points: list[np.ndarray] = []
+    track_lengths: list[int] = []
+    errors: list[float] = []
+
+    for point_id, point, xyz in records:
+        length = int(point.track.length())
+        error = float(point.error) if bool(getattr(point, "has_error", False)) else float("nan")
+        point_ids.append(point_id)
+        points.append(xyz)
+        track_lengths.append(length)
+        errors.append(error)
+        for element in point.track.elements:
+            image = rec.image(int(element.image_id))
+            name = str(image.name)
+            view = view_by_name.get(name)
+            if view is None:
+                continue
+            point2d = image.points2D[int(element.point2D_idx)]
+            xy = np.asarray(point2d.xy, dtype=np.float64).reshape(2)
+            camera_xyz = (
+                np.asarray(view["rotation"], dtype=np.float64) @ xyz
+                + np.asarray(view["translation"], dtype=np.float64)
+            )
+            z_camera = float(camera_xyz[2])
+            if not np.isfinite(z_camera) or z_camera <= 1e-9:
+                continue
+            observations[name].append((point_id, xy, xyz, z_camera, length, error))
+
+    per_view: dict[str, dict[str, np.ndarray]] = {}
+    for name, items in observations.items():
+        items.sort(key=lambda item: item[0])
+        per_view[name] = {
+            "point3d_ids": np.asarray([item[0] for item in items], dtype=np.int64),
+            "xy": np.asarray([item[1] for item in items], dtype=np.float64).reshape(-1, 2),
+            "xyz_world": np.asarray([item[2] for item in items], dtype=np.float64).reshape(-1, 3),
+            "z_camera": np.asarray([item[3] for item in items], dtype=np.float64),
+            "track_lengths": np.asarray([item[4] for item in items], dtype=np.int32),
+            "reprojection_errors_px": np.asarray([item[5] for item in items], dtype=np.float64),
+        }
+
+    return {
+        "point3d_ids": np.asarray(point_ids, dtype=np.int64),
+        "points_xyz": np.asarray(points, dtype=np.float64).reshape(-1, 3),
+        "track_lengths": np.asarray(track_lengths, dtype=np.int32),
+        "reprojection_errors_px": np.asarray(errors, dtype=np.float64),
+        "views": per_view,
+    }
 
 
 def _write_pairs_file(pairs: list[tuple[str, str]], path: Path) -> None:
@@ -431,6 +563,13 @@ def run_masked_sfm(
         "views": [],
         "intrinsics": None,
         "points_xyz": np.zeros((0, 3), dtype=np.float64),
+        "track_evidence": {
+            "point3d_ids": np.zeros(0, dtype=np.int64),
+            "points_xyz": np.zeros((0, 3), dtype=np.float64),
+            "track_lengths": np.zeros(0, dtype=np.int32),
+            "reprojection_errors_px": np.zeros(0, dtype=np.float64),
+            "views": {},
+        },
         "registered_fraction": 0.0,
         "report": report,
     }
@@ -585,10 +724,11 @@ def run_masked_sfm(
             report["error"] = "mapper produced no reconstruction"
             return failure
 
-        # Model selection: most registered images, tie-break lower mean error.
+        # Model selection: broad coherent angular support first. A large narrow
+        # arc of hand-anchored views must not beat a smaller object orbit.
         best_key = None
         best_kept: list[dict[str, Any]] | None = None
-        best_rank: tuple[int, float] | None = None
+        best_rank: tuple[int, float, float, int, float] | None = None
         for key in sorted(reconstructions.keys()):
             rec = reconstructions[key]
             num_reg = int(rec.num_reg_images())
@@ -619,7 +759,15 @@ def run_masked_sfm(
             entry["kept_median_iou"] = median_iou
             if median_iou < 0.45:
                 continue
-            rank = (len(kept), -mean_err)
+            coverage = camera_coverage(kept, points)
+            entry["camera_coverage"] = coverage
+            rank = (
+                int(coverage["occupied_30deg_bins"]),
+                float(coverage["azimuth_span_deg"]),
+                median_iou,
+                len(kept),
+                -mean_err,
+            )
             if best_rank is None or rank > best_rank:
                 best_rank = rank
                 best_key = key
@@ -632,6 +780,9 @@ def run_masked_sfm(
         best = reconstructions[best_key]
         report["chosen_model"] = int(best_key)
         report["kept_views"] = len(best_kept)
+        report["camera_coverage"] = camera_coverage(
+            best_kept, _points_xyz(best, min_track_length=3)
+        )
 
         model_dir = work_dir / "model"
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -651,6 +802,7 @@ def run_masked_sfm(
             "views": views,
             "intrinsics": _intrinsics(best),
             "points_xyz": _points_xyz(best, min_track_length=3),
+            "track_evidence": _track_evidence(best, views, min_track_length=3),
             "registered_fraction": registered_fraction,
             "report": report,
         }

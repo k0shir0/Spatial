@@ -85,6 +85,48 @@ python -m pip install -e . --no-deps
 
 ## Workflows
 
+### Evidence-gated video reconstruction
+
+`scripts/reconstruct_object.py` is the automatic hybrid path for a short clip
+of a hand-rotated object. It extracts frames locally, builds clip-consistent
+object masks, and removes or rejects hand/arm-contaminated and otherwise unsafe
+frames before feature matching. Masked COLMAP then attempts a true SfM general
+candidate. Poses inferred from silhouettes may extend visual-hull carving, but
+they never provide texture pixels or count as independent camera evidence.
+
+The general candidate is delivered only if an independent fidelity gate accepts
+its recovered poses, held-out silhouette agreement, source-surface support,
+texture coverage, topology, and the reloaded GLB. If it is rejected, the router
+tries two explicitly labelled regularizers: an evidence-fitted rounded slab for
+compatible rigid objects, then an inferred bilateral 2.5D soft volume. These
+fallbacks are not reported as photogrammetry. If no candidate has adequate
+evidence, the command fails closed with `needs_recapture` instead of promoting a
+plausible-looking but unsupported mesh.
+
+The current command requires FFmpeg, COLMAP, and a locally cached `u2netp`
+rembg model; it does not download weights implicitly. The Depth Anything model
+is optional and supplies predicted—not measured—depth:
+
+```bash
+python scripts/reconstruct_object.py capture.mov \
+  --output runs/capture-001 \
+  --depth-model runs/models/depth_anything_v2_small_int8.onnx
+```
+
+For the Mac-only, existing-video Depth Anything/Apple Depth Pro comparison,
+including its frozen-input evidence gate, offline setup boundary, and upstream
+license notes, see [Mac existing-video depth comparison](docs/MAC_VIDEO_DEPTH.md).
+
+Use a new, empty output directory for every attempt. `ingest/`, `masks/`, and
+`sfm/` retain the source evidence; `candidates/` retains every attempted general
+or regularized result; and `model/` contains stable names for the selected GLB,
+optional USDZ/texture, and QA images. `source_preflight.json` records capture
+checks, while `report.json` records candidate rejections, the selection reason,
+artifact hashes, model/depth provenance, and known limits. Metric scale remains
+ambiguous without a reference, hidden surfaces cannot be recovered, deformation
+violates SfM assumptions, and reflective or textureless captures may require a
+better-lit, hands-clear recapture.
+
 ### Parametric assets
 
 `scripts/build_parametric_asset.py` rectifies explicitly reviewed front/back

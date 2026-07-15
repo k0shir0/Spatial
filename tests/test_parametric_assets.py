@@ -167,6 +167,89 @@ class ParametricAssetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "texture_mode"):
             load_config(self.write_config(payload, "invalid-texture-mode.json"))
 
+    def test_provenance_metadata_is_validated_and_reviewed_defaults_are_preserved(self) -> None:
+        normalized = load_config(self.write_config(self.phone_config()))
+        self.assertEqual(normalized["authoring_mode"], "reviewed")
+        self.assertEqual(normalized["asset_kind"], "phone")
+
+        invalid_mode = self.phone_config() | {"authoring_mode": "assumed"}
+        with self.assertRaisesRegex(ValueError, "authoring_mode"):
+            load_config(self.write_config(invalid_mode, "invalid-authoring-mode.json"))
+
+        invalid_kind = self.phone_config() | {"asset_kind": "Rounded slab"}
+        with self.assertRaisesRegex(ValueError, "asset_kind"):
+            load_config(self.write_config(invalid_kind, "invalid-asset-kind.json"))
+
+        unknown_kind = self.phone_config() | {"asset_kind": "generic_slab"}
+        with self.assertRaisesRegex(ValueError, "asset_kind"):
+            load_config(self.write_config(unknown_kind, "unknown-asset-kind.json"))
+
+        incompatible = self.book_config() | {"asset_kind": "rounded_slab"}
+        with self.assertRaisesRegex(ValueError, "incompatible"):
+            load_config(self.write_config(incompatible, "incompatible-asset-kind.json"))
+
+    def test_automatic_manifest_separates_semantic_kind_and_automatic_provenance(self) -> None:
+        payload = self.phone_config()
+        payload.update(
+            {
+                "asset_name": "Automatically fitted rounded slab",
+                "authoring_mode": "automatic",
+                "asset_kind": "rounded_slab",
+                "dimension_basis": (
+                    "relative dimensions inferred automatically; absolute scale is ambiguous"
+                ),
+                "dimensions_mm": {
+                    "width": 100.0,
+                    "height": 98.0,
+                    "depth": 22.0,
+                    "corner_radius": 9.0,
+                    "bevel": 1.2,
+                },
+                "phone": {"decorations": []},
+            }
+        )
+        output = self.root / "automatic-output"
+        manifest = build_asset(
+            self.write_config(payload, "automatic-config.json"),
+            output,
+            allow_usdz=False,
+        )
+
+        self.assertEqual(manifest["authoring_mode"], "automatic")
+        self.assertEqual(manifest["asset_kind"], "rounded_slab")
+        self.assertEqual(manifest["geometry_template"], "phone")
+        self.assertIn("automatic", manifest["method"])
+        self.assertEqual(
+            manifest["execution"]["scope"],
+            "parametric builder only; upstream selection, segmentation, and source preparation excluded",
+        )
+        self.assertEqual(
+            manifest["geometry"]["classification"],
+            "parametric / automatically inferred relative fit",
+        )
+        self.assertIs(manifest["geometry"]["physical_scale_inferred"], False)
+        self.assertEqual(
+            manifest["geometry"]["dimension_normalization"],
+            "face width = 100 builder mm",
+        )
+        for face in ("front", "back"):
+            appearance = manifest["appearance"][face]
+            self.assertIn("automatic", appearance["classification"])
+            self.assertIn("body-color fill", appearance["classification"])
+            self.assertFalse(appearance["automatic_detection"])
+            self.assertFalse(appearance["rectifier_performed_detection"])
+            self.assertEqual(appearance["quad_source"], "automatic_upstream")
+            self.assertIn("automatic_quad_px", appearance)
+            self.assertNotIn("reviewed_quad_px", appearance)
+
+        serialized = json.dumps(manifest).lower()
+        self.assertNotIn("manual", serialized)
+        self.assertNotIn("reviewed", serialized)
+        self.assertIn("no physical scale is inferred", manifest["method_limit"])
+        self.assertTrue((output / "front_quad_overlay.png").is_file())
+        self.assertTrue((output / "back_quad_overlay.png").is_file())
+        self.assertFalse((output / "front_quad_review.png").exists())
+
     def test_material_mode_back_exports_without_source_texture(self) -> None:
         payload = self.phone_config()
         payload["back"]["texture_mode"] = "material"  # type: ignore[index]
