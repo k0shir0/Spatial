@@ -131,6 +131,7 @@ def _score_views(
         "boundary": 0,
         "passed": 0,
     }
+    brightness: list[float] = []
 
     for view_index, view in enumerate(views):
         height, width = view_hw[view_index]
@@ -154,16 +155,10 @@ def _score_views(
 
         image = _load_bgr(view, width, height)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        half = cv2.resize(
-            gray,
-            (max(1, round(width * 0.5)), max(1, round(height * 0.5))),
-            interpolation=cv2.INTER_AREA,
+        inside_pixels = gray[mask_bool]
+        brightness.append(
+            float(np.median(inside_pixels)) if inside_pixels.size else 128.0
         )
-        grad = cv2.magnitude(
-            cv2.Scharr(half, cv2.CV_32F, 1, 0), cv2.Scharr(half, cv2.CV_32F, 0, 1)
-        )
-        sx = grad.shape[1] / float(width)
-        sy = grad.shape[0] / float(height)
 
         u, v, depth = project_points(vertices, rotation, translation, intrinsics)
         fu = u[faces]
@@ -207,12 +202,11 @@ def _score_views(
             (fu[:, 1] - fu[:, 0]) * (fv[:, 2] - fv[:, 0])
             - (fu[:, 2] - fu[:, 0]) * (fv[:, 1] - fv[:, 0])
         )
-        sample_u = np.stack([cu, fu[:, 0], fu[:, 1], fu[:, 2]], axis=1).ravel() * sx
-        sample_v = np.stack([cvv, fv[:, 0], fv[:, 1], fv[:, 2]], axis=1).ravel() * sy
-        mean_grad = bilinear_sample(grad, sample_u, sample_v).reshape(face_count, 4)
-        mean_grad = mean_grad.mean(axis=1)
         boundary_term = np.minimum(1.0, min_boundary / (3.0 * boundary_px))
-        quality = area * (mean_grad + 1.0) * boundary_term
+        # Prefer large, frontal, well-inside-mask projections.  A gradient term
+        # here would reward shadow boundaries and crumple, systematically
+        # picking the worst-lit source views — measured on real captures.
+        quality = area * boundary_term * np.maximum(frontality, 0.0)
 
         rows = np.flatnonzero(gate)
         if not len(rows):
@@ -224,7 +218,7 @@ def _score_views(
         cand_q[winners, slots] = quality[winners]
         cand_view[winners, slots] = view_index
 
-    return cand_view, cand_q, gate_stats
+    return cand_view, cand_q, gate_stats, np.asarray(brightness)
 
 
 def _label_faces(
@@ -406,7 +400,7 @@ def bake_texture_atlas(
             probe = _load_bgr(view, 1, 1)
             view_hw.append((probe.shape[0], probe.shape[1]))
 
-    cand_view, cand_q, gate_stats = _score_views(
+    cand_view, cand_q, gate_stats, view_brightness = _score_views(
         vertices,
         faces,
         normals,
@@ -490,10 +484,21 @@ def bake_texture_atlas(
         if chart["label"] >= 0:
             by_view[chart["label"]].append(chart)
 
+    # Exposure normalization: scale every source view to the fleet's median
+    # object brightness so charts from shadowed frames do not darken the atlas.
+    target_brightness = float(np.median(view_brightness[view_brightness > 0])) if (
+        len(view_brightness) and (view_brightness > 0).any()
+    ) else 128.0
+
     for view_index in sorted(by_view):
         view = views[view_index]
         height, width = view_hw[view_index]
         image = _load_bgr(view, width, height)
+        gain = float(
+            np.clip(target_brightness / max(view_brightness[view_index], 1.0), 0.6, 1.8)
+        )
+        if abs(gain - 1.0) > 0.02:
+            image = np.clip(image.astype(np.float32) * gain, 0, 255).astype(np.uint8)
         _, face_index = rasterize_zbuffer(
             vertices,
             faces,
@@ -575,6 +580,15 @@ def bake_texture_atlas(
             view = views[view_index]
             height, width = view_hw[view_index]
             image = _load_bgr(view, width, height).astype(np.float64)
+            gain = float(
+                np.clip(
+                    target_brightness / max(view_brightness[view_index], 1.0),
+                    0.6,
+                    1.8,
+                )
+            )
+            if abs(gain - 1.0) > 0.02:
+                image = np.clip(image * gain, 0.0, 255.0)
             for i, side in needed[view_index]:
                 points = seam_records[i][4]
                 u, v, _ = project_points(

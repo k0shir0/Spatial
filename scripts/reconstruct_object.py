@@ -356,8 +356,9 @@ def main() -> int:
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
-        "--match-threads", type=int, default=2,
-        help=">1 speeds SIFT matching; weakens strict cross-run determinism",
+        "--match-threads", type=int, default=1,
+        help=">1 speeds SIFT matching; weakens strict cross-run determinism "
+        "and lets the SfM solve vary between runs",
     )
     args = parser.parse_args()
 

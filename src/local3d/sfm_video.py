@@ -397,7 +397,7 @@ def run_masked_sfm(
     overlap: int = 20,
     loop_stride: int = 6,
     max_features: int = 12288,
-    match_threads: int = 1,
+    match_threads: int = 1,  # keep 1: threaded matching makes the solve vary run to run
     mapper_threads: int = 1,
 ) -> dict[str, Any]:
     """Register a masked object video into one COLMAP model on CPU.
