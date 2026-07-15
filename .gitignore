@@ -1,0 +1,56 @@
+# Private source media and generated artifacts
+/vids/
+/runs/
+/artifacts/
+/outputs/
+*.mov
+*.mp4
+*.m4v
+*.heic
+*.glb
+*.gltf
+*.usda
+*.usdc
+*.usdz
+
+# Generated demo inputs/outputs
+/examples/demo/
+/examples/output/
+
+# Model checkpoints are never part of this repository
+*.ckpt
+*.onnx
+*.pt
+*.pth
+*.safetensors
+
+# Python
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Swift / Xcode
+**/.build/
+**/.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# Local configuration and operating-system files
+.env
+.env.*
+!.env.example
+.local3d/
+.DS_Store
+Thumbs.db
+*.log
+*.tmp

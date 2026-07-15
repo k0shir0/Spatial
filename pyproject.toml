@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spatial-local3d"
+version = "0.1.0"
+description = "Local-first, deterministic building blocks for reviewed video-to-3D workflows"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "JustinGamer191"}]
+keywords = ["3d", "glb", "usdz", "computer-vision", "photogrammetry", "reconstruction"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "numpy>=1.26,<3",
+  "opencv-python-headless>=4.9,<5",
+  "Pillow>=10,<13",
+  "trimesh>=4,<5",
+  "scikit-image>=0.22,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+segmentation = ["rembg>=2,<3", "scipy>=1.11,<2"]
+
+[project.scripts]
+spatial-local3d = "local3d.cli:main"
+spatial-ingest = "local3d.ingest:main"
+spatial-parametric = "local3d.parametric_assets:main"
+spatial-shape-router = "local3d.shape_router:main"
+
+[project.urls]
+Homepage = "https://github.com/JustinGamer191/Spatial"
+Issues = "https://github.com/JustinGamer191/Spatial/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["local3d*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = "-ra"

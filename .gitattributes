@@ -1,0 +1,14 @@
+* text=auto eol=lf
+
+*.glb binary
+*.gltf binary
+*.mov binary
+*.mp4 binary
+*.m4v binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.heic binary
+*.usda text
+*.usdc binary
+*.usdz binary

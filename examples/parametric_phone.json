@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "asset_name": "Spatial synthetic demo phone",
+  "kind": "phone",
+  "output_name": "spatial_demo_phone",
+  "dimension_basis": "synthetic public demonstration dimensions",
+  "notes": [
+    "Both input images are generated locally by scripts/make_demo_inputs.py.",
+    "Only the synthetic display pixels are projected; rear features are explicit geometry."
+  ],
+  "front": {
+    "image": "demo/front.png",
+    "quad_px": [[36, 36], [603, 36], [603, 1243], [36, 1243]],
+    "rotate_quarter_turns": 0,
+    "texture_mode": "source"
+  },
+  "back": {
+    "image": "demo/back.png",
+    "quad_px": [[36, 36], [603, 36], [603, 1243], [36, 1243]],
+    "rotate_quarter_turns": 0,
+    "texture_mode": "material"
+  },
+  "dimensions_mm": {
+    "width": 74.0,
+    "height": 150.0,
+    "depth": 10.8,
+    "corner_radius": 9.0,
+    "bevel": 1.8
+  },
+  "texture_size": 512,
+  "corner_segments": 12,
+  "output_rotation_deg": [0, 0, 0],
+  "materials": {
+    "front": {"color_rgb": [6, 8, 12], "metallic": 0.0, "roughness": 0.56},
+    "back": {"color_rgb": [112, 124, 136], "metallic": 0.0, "roughness": 0.55},
+    "body": {"color_rgb": [145, 158, 168], "metallic": 0.03, "roughness": 0.34},
+    "camera_bump": {"color_rgb": [132, 153, 167], "metallic": 0.02, "roughness": 0.42},
+    "lens_plate": {"color_rgb": [48, 70, 87], "metallic": 0.02, "roughness": 0.42},
+    "lens": {"color_rgb": [7, 11, 15], "metallic": 0.0, "roughness": 0.16},
+    "lens_ring": {"color_rgb": [154, 171, 182], "metallic": 0.08, "roughness": 0.30},
+    "flash": {"color_rgb": [224, 217, 187], "metallic": 0.0, "roughness": 0.54},
+    "magsafe": {"color_rgb": [218, 212, 199], "metallic": 0.0, "roughness": 0.62},
+    "button": {"color_rgb": [132, 148, 159], "metallic": 0.04, "roughness": 0.36},
+    "port": {"color_rgb": [15, 23, 29], "metallic": 0.0, "roughness": 0.48}
+  },
+  "phone": {
+    "camera_bump": {
+      "side": "back",
+      "center_mm": [18.0, 53.0],
+      "size_mm": [34.0, 38.0],
+      "protrusion_mm": 1.8,
+      "corner_radius_mm": 7.0,
+      "lenses": [
+        {"center_mm": [3.0, 9.0], "relative_to": "bump", "radius_mm": 5.8, "protrusion_mm": 0.8, "segments": 24},
+        {"center_mm": [3.0, -9.0], "relative_to": "bump", "radius_mm": 5.8, "protrusion_mm": 0.8, "segments": 24}
+      ]
+    },
+    "decorations": [
+      {"name": "LensCapsule", "type": "rounded_prism", "side": "back", "center_mm": [21.0, 53.0], "size_mm": [19.0, 33.0], "corner_radius_mm": 7.5, "offset_mm": 1.75, "protrusion_mm": 0.3, "segments": 12, "material": "lens_plate"},
+      {"name": "UpperLensRing", "type": "annulus", "side": "back", "center_mm": [21.0, 62.0], "radius_mm": 7.1, "inner_radius_mm": 5.95, "offset_mm": 2.5, "protrusion_mm": 0.4, "segments": 24, "material": "lens_ring"},
+      {"name": "LowerLensRing", "type": "annulus", "side": "back", "center_mm": [21.0, 44.0], "radius_mm": 7.1, "inner_radius_mm": 5.95, "offset_mm": 2.5, "protrusion_mm": 0.4, "segments": 24, "material": "lens_ring"},
+      {"name": "Flash", "type": "cylinder", "side": "back", "center_mm": [7.5, 53.0], "radius_mm": 2.0, "offset_mm": 1.8, "protrusion_mm": 0.3, "segments": 16, "material": "flash"},
+      {"name": "MagSafeRing", "type": "annulus", "side": "back", "center_mm": [0.0, -2.0], "radius_mm": 25.0, "inner_radius_mm": 21.0, "offset_mm": 0.0, "protrusion_mm": 0.25, "segments": 32, "material": "magsafe"},
+      {"name": "MagSafeBar", "type": "rounded_prism", "side": "back", "center_mm": [0.0, -39.0], "size_mm": [6.0, 17.0], "corner_radius_mm": 2.8, "offset_mm": 0.0, "protrusion_mm": 0.25, "segments": 12, "material": "magsafe"},
+      {"name": "PowerButton", "type": "box", "center_mm": [37.2, 28.0, 0.0], "size_mm": [1.0, 19.0, 3.0], "material": "button"},
+      {"name": "VolumeButton", "type": "box", "center_mm": [-37.2, 25.0, 0.0], "size_mm": [1.0, 25.0, 3.0], "material": "button"},
+      {"name": "UsbCPort", "type": "box", "center_mm": [0.0, -75.3, 0.0], "size_mm": [9.0, 1.0, 3.0], "material": "port"}
+    ]
+  }
+}
