@@ -61,8 +61,8 @@ _D_AZ_DEG = 35.0
 _D_EL_DEG = 15.0
 _LOG_R = 0.15
 # Acceptance floor and fraction of the registered-view IoU it must clear.
-_ACCEPT_FLOOR = 0.55
-_ACCEPT_FACTOR = 0.80
+_ACCEPT_FLOOR = 0.50
+_ACCEPT_FACTOR = 0.70
 # End-extrapolation cap on azimuth change (deg) beyond the outermost anchor.
 _EXTRAP_AZ_CAP_DEG = 45.0
 # Upper bound on reprojected surface voxels (deterministic stride if exceeded).

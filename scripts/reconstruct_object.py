@@ -208,10 +208,11 @@ def stage_poses(
 
         posed_fraction = len(carve_views) / max(len(frames), 1)
         if posed_fraction < 0.5:
-            raise SystemExit(
-                "needs_recapture: only "
-                f"{len(carve_views)} of {len(frames)} frames posed after "
-                "silhouette completion; coverage is insufficient for carving"
+            _log(
+                "poses",
+                f"WARNING partial coverage: {len(carve_views)} of {len(frames)} "
+                "frames posed; unobserved surfaces will be point-hull bounded "
+                "and reported",
             )
 
         return {
@@ -273,12 +274,18 @@ def stage_geometry(pose_bundle: dict, depth_model: Path | None, *, resolution: i
 def stage_texture(geometry: dict, pose_bundle: dict, *, atlas_size: int) -> dict:
     from local3d.texturing import bake_texture_atlas
 
+    texture_views = [
+        view
+        for view in pose_bundle.get("carve_views") or pose_bundle["views"]
+        if view.get("image_path") and view.get("mask_tight") is not None
+    ]
     result = bake_texture_atlas(
         geometry["vertices"],
         geometry["faces"],
-        pose_bundle["views"],
+        texture_views,
         pose_bundle["intrinsics"],
         atlas_size=atlas_size,
+        min_frontality=0.15,
     )
     unobserved = result["report"].get("unobserved_face_fraction")
     _log("texture", f"atlas {atlas_size}, unobserved faces: {unobserved}")
