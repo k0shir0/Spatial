@@ -148,31 +148,7 @@ def stage_masks(
     }
 
 
-def _model_reprojection_iou(
-    rec: Any,
-    masks_dir: Path,
-    *,
-    grid: int = 96,
-    max_scored_views: int = 24,
-) -> dict[str, Any]:
-    """Functional validation: carve a coarse hull from the model's own posed
-    masks and measure how well it reprojects onto them.
-
-    Degenerate or pose-sloppy sub-models (false loop closures on repetitive
-    label text, drifted arcs) cannot reproject their own silhouettes; healthy
-    models score well above 0.45 median IoU.  This is the same fail-closed
-    check the original ``masked_sfm_hull`` used, applied per sub-model.
-    """
-
-    from local3d.fusion import carve_hull
-    from scipy import ndimage
-
-    report: dict[str, Any] = {"median_iou": 0.0, "scored_views": 0}
-    points = _points_xyz(rec, min_track_length=3)
-    if len(points) < 50:
-        report["reason"] = "too few tracked points"
-        return report
-
+def _masked_views_from_rec(rec: Any, masks_dir: Path) -> list[dict[str, Any]]:
     views = []
     for image_id in rec.reg_image_ids():
         image = rec.image(image_id)
@@ -190,32 +166,48 @@ def _model_reprojection_iou(
                 rotation=np.asarray(pose.rotation.matrix()),
                 translation=np.asarray(pose.translation),
                 mask_tight=mask > 127,
+                extras={"image_id": int(image_id)},
             )
         )
-    if len(views) < 5:
-        report["reason"] = "too few masked views"
-        return report
+    return views
 
-    camera = next(iter(rec.cameras.values()))
-    intrinsics = tuple(float(value) for value in camera.params)
+
+def _hull_view_ious(
+    views: list[dict[str, Any]],
+    intrinsics: Intrinsics,
+    points: np.ndarray,
+    *,
+    grid: int = 96,
+) -> np.ndarray:
+    """Per-view silhouette-reprojection IoU of the carved (point-bounded) hull.
+
+    Carves a coarse hull from ALL given views' masks, intersected with the
+    inflated point convex hull, then scores every view by how well the hull
+    surface reprojects onto that view's mask.
+    """
+
+    from local3d.fusion import carve_hull, point_hull_occupancy
+    from scipy import ndimage
+
     lower = np.percentile(points, 1, axis=0)
     upper = np.percentile(points, 99, axis=0)
     pad = 0.15 * (upper - lower)
-    occupancy, _ = carve_hull(
-        views, intrinsics, (lower - pad, upper + pad), resolution=grid
-    )
+    bounds = (lower - pad, upper + pad)
+    occupancy, _ = carve_hull(views, intrinsics, bounds, resolution=grid)
+    try:
+        occupancy &= point_hull_occupancy(points, bounds, grid)
+    except Exception:
+        pass
     if not occupancy.any():
-        report["reason"] = "hull carved away entirely"
-        return report
+        return np.zeros(len(views))
 
     surface = occupancy & ~ndimage.binary_erosion(occupancy)
     zz, yy, xx = np.nonzero(surface)
-    axes = [np.linspace((lower - pad)[i], (upper + pad)[i], grid) for i in range(3)]
+    axes = [np.linspace(bounds[0][i], bounds[1][i], grid) for i in range(3)]
     world = np.column_stack([axes[0][xx], axes[1][yy], axes[2][zz]])
 
-    step = max(1, len(views) // max_scored_views)
-    ious = []
-    for view in views[::step]:
+    ious = np.zeros(len(views))
+    for index, view in enumerate(views):
         mask = view["mask_tight"]
         height, width = mask.shape
         u, v, depth = project_points(
@@ -237,11 +229,50 @@ def _model_reprojection_iou(
             interpolation=cv2.INTER_NEAREST,
         ) > 0
         union = float(np.logical_or(silhouette > 0, small).sum())
-        ious.append(float(np.logical_and(silhouette > 0, small).sum()) / max(union, 1.0))
+        ious[index] = float(np.logical_and(silhouette > 0, small).sum()) / max(union, 1.0)
+    return ious
 
-    report["median_iou"] = float(np.median(ious))
-    report["scored_views"] = len(ious)
-    return report
+
+def _prune_views_by_coherence(
+    views: list[dict[str, Any]],
+    intrinsics: Intrinsics,
+    points: np.ndarray,
+    *,
+    min_iou: float = 0.45,
+    rounds: int = 3,
+    min_views: int = 10,
+) -> tuple[list[dict[str, Any]], np.ndarray, dict[str, Any]]:
+    """Iteratively drop views whose silhouettes disagree with the common hull.
+
+    A large sub-model often mixes an accurate majority with a sloppy minority
+    (arcs glued by weak matches).  Dropping incoherent views and re-carving
+    salvages the majority instead of rejecting the whole model.
+    """
+
+    kept = list(views)
+    report: dict[str, Any] = {"rounds": []}
+    ious = np.zeros(len(kept))
+    for _ in range(rounds):
+        if len(kept) < min_views:
+            break
+        ious = _hull_view_ious(kept, intrinsics, points)
+        bad = ious < min_iou
+        report["rounds"].append(
+            {
+                "views": len(kept),
+                "median_iou": float(np.median(ious)),
+                "dropped": int(bad.sum()),
+            }
+        )
+        if not bad.any():
+            break
+        if len(kept) - int(bad.sum()) < min_views:
+            kept = [v for v, b in zip(kept, bad) if not b]
+            break
+        kept = [v for v, b in zip(kept, bad) if not b]
+    if len(ious) != len(kept) and len(kept) >= min_views:
+        ious = _hull_view_ious(kept, intrinsics, points)
+    return kept, ious, report
 
 
 def _rec_mean_error(rec: Any) -> float:
@@ -556,47 +587,68 @@ def run_masked_sfm(
 
         # Model selection: most registered images, tie-break lower mean error.
         best_key = None
+        best_kept: list[dict[str, Any]] | None = None
         best_rank: tuple[int, float] | None = None
         for key in sorted(reconstructions.keys()):
             rec = reconstructions[key]
             num_reg = int(rec.num_reg_images())
             mean_err = _rec_mean_error(rec)
-            validation: dict[str, Any] = {"median_iou": None}
-            if num_reg >= 8:
-                validation = _model_reprojection_iou(rec, eroded_masks_dir)
-            report["models"].append(
-                {
-                    "model_id": int(key),
-                    "num_reg_images": num_reg,
-                    "mean_reprojection_error": mean_err if math.isfinite(mean_err) else None,
-                    "num_points3D": int(rec.num_points3D()),
-                    "validation": validation,
-                }
-            )
-            if not validation.get("median_iou") or validation["median_iou"] < 0.45:
+            entry: dict[str, Any] = {
+                "model_id": int(key),
+                "num_reg_images": num_reg,
+                "mean_reprojection_error": mean_err if math.isfinite(mean_err) else None,
+                "num_points3D": int(rec.num_points3D()),
+            }
+            report["models"].append(entry)
+            if num_reg < 10:
+                entry["skipped"] = "too few registered images"
                 continue
-            rank = (num_reg, -mean_err)
+            points = _points_xyz(rec, min_track_length=3)
+            if len(points) < 50:
+                entry["skipped"] = "too few tracked points"
+                continue
+            model_views = _masked_views_from_rec(rec, eroded_masks_dir)
+            kept, ious, prune_report = _prune_views_by_coherence(
+                model_views, _intrinsics(rec), points
+            )
+            entry["coherence"] = prune_report
+            entry["kept_views"] = len(kept)
+            if len(kept) < 10 or len(ious) != len(kept):
+                continue
+            median_iou = float(np.median(ious))
+            entry["kept_median_iou"] = median_iou
+            if median_iou < 0.45:
+                continue
+            rank = (len(kept), -mean_err)
             if best_rank is None or rank > best_rank:
                 best_rank = rank
                 best_key = key
+                best_kept = kept
 
-        if best_key is None:
-            report["error"] = "no sub-model passed the silhouette reprojection gate"
+        if best_key is None or best_kept is None:
+            report["error"] = "no sub-model passed the silhouette coherence gate"
             return failure
 
         best = reconstructions[best_key]
         report["chosen_model"] = int(best_key)
+        report["kept_views"] = len(best_kept)
 
         model_dir = work_dir / "model"
         model_dir.mkdir(parents=True, exist_ok=True)
         best.write(str(model_dir))
 
-        registered_fraction = float(best.num_reg_images()) / float(len(frame_names))
+        # Rebuild delivery views (with image paths) restricted to the coherent set.
+        kept_names = {view["name"] for view in best_kept}
+        views = [
+            view for view in _build_views(best, frames_dir)
+            if view["name"] in kept_names
+        ]
+        registered_fraction = float(len(views)) / float(len(frame_names))
         return {
             "ok": True,
             "reconstruction": best,
             "model_dir": model_dir,
-            "views": _build_views(best, frames_dir),
+            "views": views,
             "intrinsics": _intrinsics(best),
             "points_xyz": _points_xyz(best, min_track_length=3),
             "registered_fraction": registered_fraction,

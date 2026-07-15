@@ -93,6 +93,42 @@ def _coords_from_flat(
     ).astype(np.float64)
 
 
+def point_hull_occupancy(
+    points_xyz: np.ndarray,
+    bounds: tuple[np.ndarray, np.ndarray],
+    resolution: int,
+    *,
+    inflate: float = 1.12,
+    chunk: int = 1_000_000,
+) -> np.ndarray:
+    """Occupancy of the inflated convex hull of the triangulated points.
+
+    Sparse SfM points hug the observed surface, so their (slightly inflated)
+    convex hull is a tight outer depth bound that silhouettes alone cannot
+    provide when the pose coverage has angular gaps.  Layout matches
+    :func:`carve_hull` (``[z, y, x]`` C order).
+    """
+
+    from scipy.spatial import Delaunay
+
+    points = np.asarray(points_xyz, dtype=np.float64).reshape(-1, 3)
+    if len(points) < 8:
+        raise ValueError("need at least eight points for a hull bound")
+    centroid = points.mean(axis=0)
+    inflated = centroid + (points - centroid) * float(inflate)
+    hull_vertices = inflated[np.unique(Delaunay(inflated).convex_hull.ravel())]
+    triangulation = Delaunay(hull_vertices)
+
+    axes = _axes(bounds, resolution)
+    total = resolution**3
+    occupancy = np.zeros(total, dtype=bool)
+    for start in range(0, total, chunk):
+        flat = np.arange(start, min(start + chunk, total))
+        world = _coords_from_flat(flat, axes, resolution)
+        occupancy[flat] = triangulation.find_simplex(world) >= 0
+    return occupancy.reshape((resolution, resolution, resolution))
+
+
 def _marching_to_world(
     volume: np.ndarray,
     bounds: tuple[np.ndarray, np.ndarray],
@@ -465,6 +501,17 @@ def reconstruct_geometry(
     occupancy, carve_report = carve_hull(
         silhouette_views, intrinsics, bounds, resolution=resolution
     )
+    if points_xyz is not None and len(np.asarray(points_xyz)) >= 8:
+        try:
+            point_bound = point_hull_occupancy(points_xyz, bounds, resolution)
+            before = int(occupancy.sum())
+            occupancy &= point_bound
+            carve_report["point_hull_intersection"] = {
+                "before_voxels": before,
+                "after_voxels": int(occupancy.sum()),
+            }
+        except Exception as exc:  # hull degenerate -> keep silhouette-only
+            carve_report["point_hull_intersection"] = {"skipped": str(exc)}
 
     report: dict[str, Any] = {
         "bounds_source": bounds_source,

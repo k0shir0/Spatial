@@ -186,7 +186,10 @@ def stage_poses(
             from local3d.pose_complete import complete_poses
 
             frame_by_name = {frame.name: frame for frame in frames}
-            completed = complete_poses(views, tight, tuple(result["intrinsics"]))
+            completed = complete_poses(
+                views, tight, tuple(result["intrinsics"]),
+                points_xyz=result["points_xyz"],
+            )
             completion_report = completed.get("report")
             carve_views = []
             for view in completed["views_all"]:

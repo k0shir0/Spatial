@@ -408,6 +408,7 @@ def complete_poses(
     masks_by_name: dict[str, np.ndarray],
     intrinsics: Intrinsics,
     *,
+    points_xyz: np.ndarray | None = None,
     grid: int = 112,
     iterations: int = 2,
     seed: int = 0,
@@ -443,6 +444,23 @@ def complete_poses(
     cv2.setNumThreads(1)
     intr = tuple(float(value) for value in intrinsics)
 
+    def _bound_by_points(occ: np.ndarray, bnds) -> np.ndarray:
+        """Intersect with the inflated sparse-point hull when points exist.
+
+        Silhouette carving from a partial arc leaves the hull elongated along
+        unobserved directions; the point hull restores a realistic depth bound
+        so silhouette registration scores against a credible template.
+        """
+
+        if points_xyz is None or len(np.asarray(points_xyz)) < 8:
+            return occ
+        try:
+            bound = fusion.point_hull_occupancy(points_xyz, bnds, occ.shape[0])
+        except Exception:
+            return occ
+        merged = occ & bound
+        return merged if merged.any() else occ
+
     registered = sorted(views, key=lambda item: item["name"])
     if len(registered) < 2:
         raise ValueError("complete_poses needs at least two registered views")
@@ -469,6 +487,7 @@ def complete_poses(
         _, carve_report = fusion.carve_hull(
             registered, intr, bounds, resolution=grid
         )
+    occupancy = _bound_by_points(occupancy, bounds)
     centroid = _occupied_world(occupancy, bounds).mean(axis=0)
     surface = _surface_world(occupancy, bounds)
 
@@ -545,6 +564,7 @@ def complete_poses(
             occ_iter, _ = fusion.carve_hull(
                 carve_views, intr, bounds, resolution=grid
             )
+            occ_iter = _bound_by_points(occ_iter, bounds)
             if occ_iter.any():
                 current_surface = _surface_world(occ_iter, bounds)
             todo = rejected_now
