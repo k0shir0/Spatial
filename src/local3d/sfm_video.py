@@ -68,7 +68,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from local3d.recon_common import Intrinsics, make_view
+from local3d.recon_common import Intrinsics, make_view, project_points
 
 _FRAME_SUFFIXES = (".png", ".jpg", ".jpeg")
 
@@ -148,42 +148,99 @@ def stage_masks(
     }
 
 
-def _model_sanity(rec: Any) -> dict[str, Any]:
-    """Geometric sanity of a sub-model: the object must sit inside the orbit.
+def _model_reprojection_iou(
+    rec: Any,
+    masks_dir: Path,
+    *,
+    grid: int = 96,
+    max_scored_views: int = 24,
+) -> dict[str, Any]:
+    """Functional validation: carve a coarse hull from the model's own posed
+    masks and measure how well it reprojects onto them.
 
-    A healthy hand-rotation model has camera centers orbiting a compact point
-    cloud.  False loop closures (repetitive label text) instead produce point
-    sheets larger than the orbit radius; those models must never win selection.
+    Degenerate or pose-sloppy sub-models (false loop closures on repetitive
+    label text, drifted arcs) cannot reproject their own silhouettes; healthy
+    models score well above 0.45 median IoU.  This is the same fail-closed
+    check the original ``masked_sfm_hull`` used, applied per sub-model.
     """
 
+    from local3d.fusion import carve_hull
+    from scipy import ndimage
+
+    report: dict[str, Any] = {"median_iou": 0.0, "scored_views": 0}
     points = _points_xyz(rec, min_track_length=3)
-    report: dict[str, Any] = {"sane": False, "reason": None}
     if len(points) < 50:
         report["reason"] = "too few tracked points"
         return report
-    centers = np.array([
-        np.asarray(rec.image(image_id).projection_center())
-        for image_id in rec.reg_image_ids()
-    ])
-    centroid = points.mean(axis=0)
-    cam_dist = float(np.median(np.linalg.norm(centers - centroid, axis=1)))
-    point_radius = np.linalg.norm(points - centroid, axis=1)
-    inside = float(np.mean(point_radius < 0.6 * cam_dist))
-    rms_radius = float(np.sqrt(np.mean(point_radius**2)))
-    report.update(
-        {
-            "median_camera_distance": cam_dist,
-            "point_rms_radius": rms_radius,
-            "points_inside_orbit_fraction": inside,
-        }
+
+    views = []
+    for image_id in rec.reg_image_ids():
+        image = rec.image(image_id)
+        mask = cv2.imread(
+            str(Path(masks_dir) / f"{Path(image.name).stem}_mask.png"),
+            cv2.IMREAD_GRAYSCALE,
+        )
+        if mask is None:
+            continue
+        pose = image.cam_from_world()
+        views.append(
+            make_view(
+                name=image.name,
+                image_path=Path(image.name),
+                rotation=np.asarray(pose.rotation.matrix()),
+                translation=np.asarray(pose.translation),
+                mask_tight=mask > 127,
+            )
+        )
+    if len(views) < 5:
+        report["reason"] = "too few masked views"
+        return report
+
+    camera = next(iter(rec.cameras.values()))
+    intrinsics = tuple(float(value) for value in camera.params)
+    lower = np.percentile(points, 1, axis=0)
+    upper = np.percentile(points, 99, axis=0)
+    pad = 0.15 * (upper - lower)
+    occupancy, _ = carve_hull(
+        views, intrinsics, (lower - pad, upper + pad), resolution=grid
     )
-    if inside < 0.85:
-        report["reason"] = "points spill outside the camera orbit"
+    if not occupancy.any():
+        report["reason"] = "hull carved away entirely"
         return report
-    if cam_dist < 1.5 * rms_radius:
-        report["reason"] = "cameras are inside the point cloud"
-        return report
-    report["sane"] = True
+
+    surface = occupancy & ~ndimage.binary_erosion(occupancy)
+    zz, yy, xx = np.nonzero(surface)
+    axes = [np.linspace((lower - pad)[i], (upper + pad)[i], grid) for i in range(3)]
+    world = np.column_stack([axes[0][xx], axes[1][yy], axes[2][zz]])
+
+    step = max(1, len(views) // max_scored_views)
+    ious = []
+    for view in views[::step]:
+        mask = view["mask_tight"]
+        height, width = mask.shape
+        u, v, depth = project_points(
+            world, view["rotation"], view["translation"], intrinsics
+        )
+        ok = (depth > 0) & (u >= 0) & (u < width) & (v >= 0) & (v < height)
+        quarter_h, quarter_w = height // 4, width // 4
+        silhouette = np.zeros((quarter_h, quarter_w), np.uint8)
+        vi = np.clip((v[ok] / 4).astype(np.int64), 0, quarter_h - 1)
+        ui = np.clip((u[ok] / 4).astype(np.int64), 0, quarter_w - 1)
+        silhouette[vi, ui] = 1
+        silhouette = cv2.morphologyEx(
+            cv2.dilate(silhouette, np.ones((5, 5), np.uint8)),
+            cv2.MORPH_CLOSE,
+            np.ones((9, 9), np.uint8),
+        )
+        small = cv2.resize(
+            mask.astype(np.uint8), (quarter_w, quarter_h),
+            interpolation=cv2.INTER_NEAREST,
+        ) > 0
+        union = float(np.logical_or(silhouette > 0, small).sum())
+        ious.append(float(np.logical_and(silhouette > 0, small).sum()) / max(union, 1.0))
+
+    report["median_iou"] = float(np.median(ious))
+    report["scored_views"] = len(ious)
     return report
 
 
@@ -236,7 +293,14 @@ def _points_xyz(rec: Any, *, min_track_length: int = 3) -> np.ndarray:
             points.append(np.asarray(point.xyz, dtype=np.float64).reshape(3))
     if not points:
         return np.zeros((0, 3), dtype=np.float64)
-    return np.asarray(points, dtype=np.float64)
+    array = np.asarray(points, dtype=np.float64)
+    # Drop the positional outlier shell (background/hand leakage): keep points
+    # within 3x the 75th-percentile radius of the median center, so downstream
+    # bounds are sized by the object, not by stray tracks.
+    center = np.median(array, axis=0)
+    radius = np.linalg.norm(array - center, axis=1)
+    keep = radius <= 3.0 * max(float(np.percentile(radius, 75)), 1e-9)
+    return array[keep]
 
 
 def _write_pairs_file(pairs: list[tuple[str, str]], path: Path) -> None:
@@ -497,17 +561,19 @@ def run_masked_sfm(
             rec = reconstructions[key]
             num_reg = int(rec.num_reg_images())
             mean_err = _rec_mean_error(rec)
-            sanity = _model_sanity(rec)
+            validation: dict[str, Any] = {"median_iou": None}
+            if num_reg >= 8:
+                validation = _model_reprojection_iou(rec, eroded_masks_dir)
             report["models"].append(
                 {
                     "model_id": int(key),
                     "num_reg_images": num_reg,
                     "mean_reprojection_error": mean_err if math.isfinite(mean_err) else None,
                     "num_points3D": int(rec.num_points3D()),
-                    "sanity": sanity,
+                    "validation": validation,
                 }
             )
-            if not sanity["sane"]:
+            if not validation.get("median_iou") or validation["median_iou"] < 0.45:
                 continue
             rank = (num_reg, -mean_err)
             if best_rank is None or rank > best_rank:
@@ -515,7 +581,7 @@ def run_masked_sfm(
                 best_key = key
 
         if best_key is None:
-            report["error"] = "no sub-model passed the geometric sanity gate"
+            report["error"] = "no sub-model passed the silhouette reprojection gate"
             return failure
 
         best = reconstructions[best_key]

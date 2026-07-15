@@ -87,20 +87,32 @@ def stage_masks(
     if depth_model is not None and Path(depth_model).is_file():
         from local3d.monodepth import DepthEstimator
 
-        estimator = DepthEstimator(depth_model, threads=4)
+        estimator = DepthEstimator(depth_model, threads=2)
         disparities = [estimator.disparity(image) for image in images]
         _log("masks", "depth-guided pruning enabled")
 
     tight, eroded, report = clean_mask_sequence(raw_masks, images, disparities=disparities)
+    # SfM registers on UNPRUNED masks: hand/arm features are quasi-rigid with
+    # the object between regrips and materially raise registration; the pruned
+    # masks are reserved for carving and texturing, where arm pixels poison
+    # geometry and color.
+    if disparities is not None:
+        _, eroded_sfm, _ = clean_mask_sequence(raw_masks, images)
+    else:
+        eroded_sfm = eroded
 
     tight_dir = out_dir / "masks_tight"
     eroded_dir = out_dir / "masks_eroded"
+    sfm_dir = out_dir / "masks_sfm"
     overlay_dir = out_dir / "overlays"
-    for directory in (tight_dir, eroded_dir, overlay_dir):
+    for directory in (tight_dir, eroded_dir, sfm_dir, overlay_dir):
         directory.mkdir(parents=True, exist_ok=True)
-    for path, frame, tight_mask, eroded_mask in zip(frames, images, tight, eroded):
+    for path, frame, tight_mask, eroded_mask, sfm_mask in zip(
+        frames, images, tight, eroded, eroded_sfm
+    ):
         cv2.imwrite(str(tight_dir / f"{path.stem}_mask.png"), tight_mask.astype(np.uint8) * 255)
         cv2.imwrite(str(eroded_dir / f"{path.stem}_mask.png"), eroded_mask.astype(np.uint8) * 255)
+        cv2.imwrite(str(sfm_dir / f"{path.stem}_mask.png"), sfm_mask.astype(np.uint8) * 255)
     # Review overlays for a few frames only (QA artifact, not operator gate).
     step = max(len(frames) // 12, 1)
     for path, frame, tight_mask in list(zip(frames, images, tight))[::step]:
@@ -115,6 +127,7 @@ def stage_masks(
     return {
         "tight_dir": tight_dir,
         "eroded_dir": eroded_dir,
+        "sfm_dir": sfm_dir,
         "tight": tight,
         "eroded": eroded,
         "report": report,
@@ -146,7 +159,7 @@ def stage_poses(
     frames_dir = frames[0].parent
     result = run_masked_sfm(
         frames_dir,
-        mask_bundle["eroded_dir"],
+        mask_bundle["sfm_dir"],
         work_dir,
         seed=seed,
         fov_deg=fov_deg,
@@ -189,6 +202,14 @@ def stage_poses(
             )
         except Exception as exc:  # completion is best-effort; carving falls back
             _log("poses", f"pose completion skipped: {exc}")
+
+        posed_fraction = len(carve_views) / max(len(frames), 1)
+        if posed_fraction < 0.5:
+            raise SystemExit(
+                "needs_recapture: only "
+                f"{len(carve_views)} of {len(frames)} frames posed after "
+                "silhouette completion; coverage is insufficient for carving"
+            )
 
         return {
             "mode": "sfm",
@@ -240,6 +261,7 @@ def stage_geometry(pose_bundle: dict, depth_model: Path | None, *, resolution: i
         carve_views=pose_bundle.get("carve_views"),
         resolution=resolution,
         target_triangles=target_triangles,
+        depth_threads=2,
     )
     _log("geometry", f"{len(result['faces'])} triangles")
     return result
@@ -317,10 +339,14 @@ def main() -> int:
         type=Path,
         default=ROOT / "runs" / "models" / "depth_anything_v2_small_int8.onnx",
     )
-    parser.add_argument("--min-registered-fraction", type=float, default=0.45)
+    parser.add_argument(
+        "--min-registered-fraction", type=float, default=0.12,
+        help="SfM acceptance floor; silhouette completion + the posed-coverage "
+        "gate carry validation above this",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
-        "--match-threads", type=int, default=4,
+        "--match-threads", type=int, default=2,
         help=">1 speeds SIFT matching; weakens strict cross-run determinism",
     )
     args = parser.parse_args()
