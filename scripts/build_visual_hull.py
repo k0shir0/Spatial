@@ -31,6 +31,10 @@ def main() -> None:
     parser.add_argument("--padding", type=float, default=0.04)
     parser.add_argument("--smooth-iterations", type=int, default=8)
     parser.add_argument(
+        "--target-triangles", type=int, default=0,
+        help="decimate to about this many triangles (0 disables; needs the mesh extra)",
+    )
+    parser.add_argument(
         "--max-view-violations", type=int, default=0,
         help="number of inconsistent silhouettes a voxel may survive (default: 0)",
     )
@@ -66,6 +70,13 @@ def main() -> None:
     )
     vertices, faces = occupancy_to_mesh(occupancy)
     vertices = taubin_smooth(vertices, faces, iterations=args.smooth_iterations)
+    post_report = None
+    if args.target_triangles:
+        from local3d.mesh_post import postprocess  # noqa: E402
+
+        vertices, faces, post_report = postprocess(
+            vertices, faces, target_triangles=args.target_triangles
+        )
     write_glb_mesh(
         args.output, vertices.tolist(), faces.tolist(), generator="local3d-visual-hull",
         extras={
@@ -78,6 +89,7 @@ def main() -> None:
         "occupied_voxels": int(occupancy.sum()), "vertices": len(vertices), "triangles": len(faces),
         "smooth_iterations": args.smooth_iterations,
         "max_view_violations": args.max_view_violations,
+        "post_processing": post_report,
         "elapsed_seconds": round(time.perf_counter() - started, 3), "scale": "ambiguous",
     }
     args.output.with_suffix(".json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

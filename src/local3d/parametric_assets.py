@@ -53,10 +53,8 @@ import hashlib
 import json
 import math
 import re
-import struct
 import subprocess
 import sys
-import zipfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -65,6 +63,8 @@ import cv2
 import numpy as np
 import trimesh
 from PIL import Image
+
+from .usdz_pack import package_usdz
 
 
 MAX_TEXTURE_SIZE = 2048
@@ -1500,61 +1500,18 @@ def _run_checked(command: list[str], cwd: Path | None = None) -> subprocess.Comp
     return result
 
 
-def _normalize_zip_timestamps(path: Path) -> None:
-    """Make an Apple-authored USDZ byte-repeatable without repacking it.
+def package_usdz_if_available(usda: Path, usdz: Path, enabled: bool = True) -> dict[str, Any]:
+    """Package USDZ with the pure-Python deterministic packer on any platform.
 
-    ``usdzip`` already writes the required uncompressed, 64-byte-aligned USDZ
-    layout, but it stores the wall-clock build time in every local and central
-    ZIP header.  Rewriting only those fixed-width DOS timestamp fields preserves
-    entry offsets, alignment, CRCs, and payload bytes.
+    Apple's ``usdchecker --arkit`` still runs as an extra validation pass when
+    the system tool exists; packaging itself no longer needs Apple tools.
     """
 
-    payload = bytearray(path.read_bytes())
-    with zipfile.ZipFile(path, "r") as archive:
-        infos = archive.infolist()
-
-    # DOS 1980-01-01 00:00:00: time=0, date=(year=0, month=1, day=1)=33.
-    fixed_timestamp = struct.pack("<HH", 0, 33)
-    for info in infos:
-        offset = int(info.header_offset)
-        if payload[offset : offset + 4] != b"PK\x03\x04":
-            raise RuntimeError(f"invalid local ZIP header for {info.filename}")
-        payload[offset + 10 : offset + 14] = fixed_timestamp
-
-    eocd = payload.rfind(b"PK\x05\x06")
-    if eocd < 0 or eocd + 20 > len(payload):
-        raise RuntimeError("USDZ is missing its ZIP end-of-central-directory record")
-    central_offset = int(struct.unpack_from("<I", payload, eocd + 16)[0])
-    offset = central_offset
-    for info in infos:
-        if payload[offset : offset + 4] != b"PK\x01\x02":
-            raise RuntimeError(f"invalid central ZIP header for {info.filename}")
-        payload[offset + 12 : offset + 16] = fixed_timestamp
-        name_length, extra_length, comment_length = struct.unpack_from("<HHH", payload, offset + 28)
-        offset += 46 + int(name_length) + int(extra_length) + int(comment_length)
-
-    temporary = path.with_name(f".{path.name}.timestamps.tmp")
-    temporary.write_bytes(payload)
-    temporary.replace(path)
-
-
-def package_usdz_if_available(usda: Path, usdz: Path, enabled: bool = True) -> dict[str, Any]:
-    usdcat = Path("/usr/bin/usdcat")
-    usdzip = Path("/usr/bin/usdzip")
     if not enabled:
         return {"created": False, "reason": "disabled by caller"}
-    if not usdcat.is_file() or not usdzip.is_file():
-        return {
-            "created": False,
-            "reason": "Apple usdcat/usdzip are unavailable; GLB and USDA are complete",
-        }
-    _run_checked([str(usdcat), "-l", str(usda)])
     if usdz.exists():
         usdz.unlink()
-    _run_checked([str(usdzip), "--arkitAsset", usda.name, usdz.name], cwd=usda.parent)
-    _normalize_zip_timestamps(usdz)
-    usdz.chmod(0o644)
-    listing = _run_checked([str(usdzip), usdz.name, "-l", "-"], cwd=usda.parent).stdout.splitlines()
+    report = package_usdz(usda, usdz)
     validation: dict[str, Any] = {"available": False}
     usdchecker = Path("/usr/bin/usdchecker")
     if usdchecker.is_file():
@@ -1565,19 +1522,8 @@ def package_usdz_if_available(usda: Path, usdz: Path, enabled: bool = True) -> d
             "passed": True,
             "output": (checked.stdout.strip() or checked.stderr.strip())[-4000:],
         }
-    # Remove only Apple's known empty safe-save directory, never user data.
-    for temporary in usda.parent.glob("(A Document Being Saved By usdzip*"):
-        if temporary.is_dir():
-            try:
-                temporary.rmdir()
-            except OSError:
-                pass
-    return {
-        "created": True,
-        "packager": "Apple usdzip --arkitAsset",
-        "archive_entries": listing,
-        "validation": validation,
-    }
+    report["validation"] = validation
+    return report
 
 
 def _camera_basis(direction: np.ndarray) -> np.ndarray:

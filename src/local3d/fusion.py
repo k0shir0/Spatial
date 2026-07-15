@@ -430,6 +430,7 @@ def reconstruct_geometry(
     points_xyz: np.ndarray | None,
     depth_model_path: Any | None,
     *,
+    carve_views: list[dict] | None = None,
     resolution: int = 256,
     target_triangles: int = 20000,
     depth_threads: int = 4,
@@ -460,8 +461,9 @@ def reconstruct_geometry(
         bounds = bounds_from_silhouettes(views, intrinsics)
         bounds_source = "silhouettes"
 
+    silhouette_views = carve_views if carve_views else views
     occupancy, carve_report = carve_hull(
-        views, intrinsics, bounds, resolution=resolution
+        silhouette_views, intrinsics, bounds, resolution=resolution
     )
 
     report: dict[str, Any] = {

@@ -63,7 +63,9 @@ def stage_ingest(video: Path, out_dir: Path, *, sample_fps: float, max_frames: i
     return frames
 
 
-def stage_masks(frames: list[Path], out_dir: Path, *, model: str = "u2netp") -> dict:
+def stage_masks(
+    frames: list[Path], out_dir: Path, *, model: str = "u2netp", depth_model: Path | None = None
+) -> dict:
     from rembg import new_session, remove
     from PIL import Image
 
@@ -81,7 +83,15 @@ def stage_masks(frames: list[Path], out_dir: Path, *, model: str = "u2netp") -> 
         raw_masks.append(mask >= 128)
         images.append(frame)
 
-    tight, eroded, report = clean_mask_sequence(raw_masks, images)
+    disparities = None
+    if depth_model is not None and Path(depth_model).is_file():
+        from local3d.monodepth import DepthEstimator
+
+        estimator = DepthEstimator(depth_model, threads=4)
+        disparities = [estimator.disparity(image) for image in images]
+        _log("masks", "depth-guided pruning enabled")
+
+    tight, eroded, report = clean_mask_sequence(raw_masks, images, disparities=disparities)
 
     tight_dir = out_dir / "masks_tight"
     eroded_dir = out_dir / "masks_eroded"
@@ -153,12 +163,40 @@ def stage_poses(
             view["mask_tight"] = tight.get(view["name"])
             view["mask_eroded"] = eroded.get(view["name"])
         views = [v for v in views if v["mask_tight"] is not None]
+
+        # Silhouette pose completion: frames COLMAP could not register still
+        # carry good masks; recover approximate poses so carving sees the
+        # full sweep.  Completed views carve; only SfM views feed TSDF/texture.
+        carve_views = views
+        completion_report = None
+        try:
+            from local3d.pose_complete import complete_poses
+
+            frame_by_name = {frame.name: frame for frame in frames}
+            completed = complete_poses(views, tight, tuple(result["intrinsics"]))
+            completion_report = completed.get("report")
+            carve_views = []
+            for view in completed["views_all"]:
+                if view.get("image_path") in (None, Path("")) :
+                    view["image_path"] = frame_by_name.get(view["name"], view.get("image_path"))
+                if view.get("mask_tight") is None:
+                    view["mask_tight"] = tight.get(view["name"])
+                carve_views.append(view)
+            _log(
+                "poses",
+                f"silhouette completion accepted {completed.get('accepted', 0)} "
+                f"of {len(frames) - len(views)} unregistered frames",
+            )
+        except Exception as exc:  # completion is best-effort; carving falls back
+            _log("poses", f"pose completion skipped: {exc}")
+
         return {
             "mode": "sfm",
             "views": views,
+            "carve_views": carve_views,
             "intrinsics": tuple(result["intrinsics"]),
             "points_xyz": result["points_xyz"],
-            "report": result["report"],
+            "report": {"sfm": result["report"], "completion": completion_report},
         }
 
     _log("poses", "SfM below acceptance gate; trying silhouette-turntable fallback")
@@ -199,6 +237,7 @@ def stage_geometry(pose_bundle: dict, depth_model: Path | None, *, resolution: i
         pose_bundle["intrinsics"],
         pose_bundle["points_xyz"],
         depth_model if (depth_model and depth_model.is_file()) else None,
+        carve_views=pose_bundle.get("carve_views"),
         resolution=resolution,
         target_triangles=target_triangles,
     )
@@ -295,7 +334,7 @@ def main() -> int:
     if len(frames) < 24:
         raise SystemExit(f"needs_recapture: only {len(frames)} frames extracted")
 
-    mask_bundle = stage_masks(frames, out / "masks")
+    mask_bundle = stage_masks(frames, out / "masks", depth_model=args.depth_model)
     pose_bundle = stage_poses(
         frames,
         mask_bundle,

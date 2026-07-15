@@ -38,6 +38,12 @@ class IngestError(RuntimeError):
     """Raised when local video ingestion cannot be completed."""
 
 
+# "none" keeps the deterministic temporal-change heuristic. The named models
+# are small fixed-weight CV segmenters run locally through rembg/onnxruntime;
+# they involve no LLM and no network once the model file is cached.
+SEGMENTER_CHOICES = ("none", "u2netp", "u2net", "isnet-general-use")
+
+
 @dataclass(frozen=True)
 class IngestConfig:
     """Controls candidate extraction and keyframe selection.
@@ -55,8 +61,11 @@ class IngestConfig:
     image_format: str = "jpg"
     jpeg_quality: int = 95
     central_roi_fraction: float = 0.70
+    segmenter: str = "none"
 
     def validate(self) -> None:
+        if self.segmenter not in SEGMENTER_CHOICES:
+            raise ValueError(f"segmenter must be one of {sorted(SEGMENTER_CHOICES)}")
         if not math.isfinite(self.sample_fps) or self.sample_fps <= 0:
             raise ValueError("sample_fps must be finite and greater than zero")
         if self.max_candidates < 1:
@@ -714,10 +723,52 @@ def extract_frames(
     return records, analysis_images, descriptors
 
 
-def _analysis_warnings(metadata: VideoMetadata, records: Sequence[FrameRecord], keyframes: Sequence[FrameRecord]) -> list[str]:
-    warnings = [
-        "Object masks are not available during ingest; subject coverage is a temporal-change heuristic, not semantic object coverage."
-    ]
+def _subject_masks(images: Sequence[Any], model_name: str) -> list[Any]:
+    """Binary object masks for analysis images from a local CV segmenter.
+
+    Deterministic setup: onnxruntime CPU provider, single-threaded, fixed model
+    weights cached by rembg with pinned checksums.  Raises ``IngestError`` when
+    the optional segmentation extra is missing.
+    """
+
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    try:
+        from PIL import Image
+        from rembg import new_session, remove
+    except ImportError as exc:
+        raise IngestError(
+            "segmenter requires the segmentation extra: "
+            "python -m pip install 'spatial-local3d[segmentation]'"
+        ) from exc
+    session = new_session(model_name)
+    masks: list[Any] = []
+    for image in images:
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        alpha = remove(
+            Image.fromarray(rgb),
+            session=session,
+            only_mask=True,
+            post_process_mask=False,
+        )
+        masks.append((np.asarray(alpha, dtype=np.uint8) >= 128).astype(np.uint8))
+    return masks
+
+
+def _analysis_warnings(
+    metadata: VideoMetadata,
+    records: Sequence[FrameRecord],
+    keyframes: Sequence[FrameRecord],
+    *,
+    segmenter: str = "none",
+) -> list[str]:
+    if segmenter == "none":
+        warnings = [
+            "Object masks are not available during ingest; subject coverage is a temporal-change heuristic, not semantic object coverage."
+        ]
+    else:
+        warnings = [
+            f"Subject coverage uses local {segmenter} object masks; masks remain review input, not verified segmentation."
+        ]
     if metadata.duration_s < 8.0:
         warnings.append("Capture is shorter than 8 seconds; viewpoint coverage may be insufficient.")
     if metadata.display_width < 1280 or metadata.display_height < 720:
@@ -758,11 +809,17 @@ def analyze_video(
         config=chosen_config,
         metadata=metadata,
     )
-    temporal_masks = _temporal_change_masks(images, chosen_config.central_roi_fraction)
+    if chosen_config.segmenter != "none":
+        subject_masks: list[Any] | None = _subject_masks(images, chosen_config.segmenter)
+        temporal_masks = [None] * len(images)
+    else:
+        subject_masks = None
+        temporal_masks = _temporal_change_masks(images, chosen_config.central_roi_fraction)
     previous: Any | None = None
-    for record, image, temporal_mask in zip(records, images, temporal_masks, strict=True):
+    for index, (record, image, temporal_mask) in enumerate(zip(records, images, temporal_masks, strict=True)):
         record.metrics = compute_frame_metrics(
             image,
+            subject_mask=subject_masks[index] if subject_masks is not None else None,
             temporal_mask=temporal_mask,
             previous_frame_bgr=previous,
             central_roi_fraction=chosen_config.central_roi_fraction,
@@ -776,7 +833,7 @@ def analyze_video(
         chosen_config.min_keyframe_gap_s,
     )
     keyframes = [records[index] for index in chosen_indices]
-    warnings = _analysis_warnings(metadata, records, keyframes)
+    warnings = _analysis_warnings(metadata, records, keyframes, segmenter=chosen_config.segmenter)
     return VideoAnalysis(
         source=metadata.source_path,
         metadata=metadata,
@@ -806,6 +863,15 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-candidates", type=int, default=240)
     parser.add_argument("--keyframes", type=int, default=24)
     parser.add_argument("--min-gap", type=float, default=0.30, help="minimum keyframe gap in seconds")
+    parser.add_argument(
+        "--segmenter",
+        choices=SEGMENTER_CHOICES,
+        default="none",
+        help=(
+            "score subject coverage with a local CV object segmenter instead of "
+            "the temporal-change heuristic (requires the segmentation extra)"
+        ),
+    )
     return parser
 
 
@@ -816,6 +882,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_candidates=args.max_candidates,
         keyframe_count=args.keyframes,
         min_keyframe_gap_s=args.min_gap,
+        segmenter=args.segmenter,
     )
     output_dir = Path(args.output).expanduser().resolve()
     try:

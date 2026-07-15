@@ -148,6 +148,45 @@ def stage_masks(
     }
 
 
+def _model_sanity(rec: Any) -> dict[str, Any]:
+    """Geometric sanity of a sub-model: the object must sit inside the orbit.
+
+    A healthy hand-rotation model has camera centers orbiting a compact point
+    cloud.  False loop closures (repetitive label text) instead produce point
+    sheets larger than the orbit radius; those models must never win selection.
+    """
+
+    points = _points_xyz(rec, min_track_length=3)
+    report: dict[str, Any] = {"sane": False, "reason": None}
+    if len(points) < 50:
+        report["reason"] = "too few tracked points"
+        return report
+    centers = np.array([
+        np.asarray(rec.image(image_id).projection_center())
+        for image_id in rec.reg_image_ids()
+    ])
+    centroid = points.mean(axis=0)
+    cam_dist = float(np.median(np.linalg.norm(centers - centroid, axis=1)))
+    point_radius = np.linalg.norm(points - centroid, axis=1)
+    inside = float(np.mean(point_radius < 0.6 * cam_dist))
+    rms_radius = float(np.sqrt(np.mean(point_radius**2)))
+    report.update(
+        {
+            "median_camera_distance": cam_dist,
+            "point_rms_radius": rms_radius,
+            "points_inside_orbit_fraction": inside,
+        }
+    )
+    if inside < 0.85:
+        report["reason"] = "points spill outside the camera orbit"
+        return report
+    if cam_dist < 1.5 * rms_radius:
+        report["reason"] = "cameras are inside the point cloud"
+        return report
+    report["sane"] = True
+    return report
+
+
 def _rec_mean_error(rec: Any) -> float:
     try:
         value = float(rec.compute_mean_reprojection_error())
@@ -261,7 +300,7 @@ def run_masked_sfm(
     seed: int = 0,
     fov_deg: float = 65.0,
     overlap: int = 20,
-    loop_stride: int = 4,
+    loop_stride: int = 6,
     max_features: int = 12288,
     match_threads: int = 1,
     mapper_threads: int = 1,
@@ -342,7 +381,7 @@ def run_masked_sfm(
         extraction_options.num_threads = max(1, mapper_threads)
         extraction_options.use_gpu = False
         extraction_options.sift.max_num_features = max_features
-        extraction_options.sift.peak_threshold = 0.0022
+        extraction_options.sift.peak_threshold = 0.0033
         extraction_options.sift.edge_threshold = 12.0
         extraction_options.sift.estimate_affine_shape = True
         extraction_options.sift.domain_size_pooling = True
@@ -415,14 +454,14 @@ def run_masked_sfm(
         mapper_options = pc.IncrementalPipelineOptions()
         mapper_options.num_threads = mapper_threads
         mapper_options.random_seed = seed
-        mapper_options.min_num_matches = 10
+        mapper_options.min_num_matches = 15
         mapper_options.multiple_models = True
         mapper_options.max_num_models = 10
         mapper_options.ba_refine_principal_point = False
         mapper_options.mapper.init_min_num_inliers = 50
         mapper_options.mapper.init_min_tri_angle = 8.0
-        mapper_options.mapper.abs_pose_min_num_inliers = 12
-        mapper_options.mapper.abs_pose_min_inlier_ratio = 0.12
+        mapper_options.mapper.abs_pose_min_num_inliers = 20
+        mapper_options.mapper.abs_pose_min_inlier_ratio = 0.20
         mapper_options.mapper.filter_max_reproj_error = 4.0
         report["mapper"] = {
             "num_threads": mapper_threads,
@@ -458,18 +497,26 @@ def run_masked_sfm(
             rec = reconstructions[key]
             num_reg = int(rec.num_reg_images())
             mean_err = _rec_mean_error(rec)
+            sanity = _model_sanity(rec)
             report["models"].append(
                 {
                     "model_id": int(key),
                     "num_reg_images": num_reg,
                     "mean_reprojection_error": mean_err if math.isfinite(mean_err) else None,
                     "num_points3D": int(rec.num_points3D()),
+                    "sanity": sanity,
                 }
             )
+            if not sanity["sane"]:
+                continue
             rank = (num_reg, -mean_err)
             if best_rank is None or rank > best_rank:
                 best_rank = rank
                 best_key = key
+
+        if best_key is None:
+            report["error"] = "no sub-model passed the geometric sanity gate"
+            return failure
 
         best = reconstructions[best_key]
         report["chosen_model"] = int(best_key)

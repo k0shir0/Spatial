@@ -116,6 +116,32 @@ class VideoIngestTests(unittest.TestCase):
             IngestConfig(sample_fps=0).validate()
         with self.assertRaises(ValueError):
             IngestConfig(image_format="webp").validate()
+        with self.assertRaises(ValueError):
+            IngestConfig(segmenter="sam-gigantic").validate()
+
+    def test_segmenter_requires_extra_or_fails_closed(self) -> None:
+        try:
+            import rembg  # noqa: F401
+
+            raise unittest.SkipTest("rembg installed; missing-extra path not testable")
+        except ImportError:
+            pass
+        config = IngestConfig(segmenter="u2netp", keyframe_count=4, sample_fps=4.0)
+        with self.assertRaises(IngestError):
+            analyze_video(self.video, self.root / "frames-segmenter", config=config)
+
+    def test_segmenter_scores_real_object_coverage(self) -> None:
+        try:
+            import rembg  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("segmentation extra not installed")
+        config = IngestConfig(segmenter="u2netp", keyframe_count=4, sample_fps=4.0)
+        analysis = analyze_video(self.video, self.root / "frames-segmenter", config=config)
+        self.assertTrue(
+            all(record.metrics.coverage_source == "object_mask" for record in analysis.frames)
+        )
+        self.assertTrue(any("u2netp" in warning for warning in analysis.warnings))
+        self.assertEqual(analysis.config.segmenter, "u2netp")
 
 
 if __name__ == "__main__":
