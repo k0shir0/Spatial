@@ -1,6 +1,6 @@
 # Open-source landscape for a Chromebook-class Spatial
 
-Research date: **2026-07-14**. Priority constraint: **lightweight above all — the
+Research date: **2026-07-15**. Priority constraint: **lightweight above all — the
 pipeline must run on a Chromebook** (ChromeOS Linux VM, 4–8 GB total RAM,
 x86_64 or aarch64, no GPU). All licenses, release dates, wheel tags, and model
 sizes were verified against PyPI/GitHub/Hugging Face on the research date;
@@ -12,13 +12,19 @@ Latency figures for Chromebook-class CPUs are extrapolations unless noted.
 
 ## Headline conclusions
 
-1. **There is no maintained open-source, CPU-only, laptop-class object-capture
-   pipeline.** COLMAP dense and Meshroom need CUDA; OpenMVS is AGPL with a
-   research-only max-flow component; WebODM needs 4 GB+ for aerial-style jobs;
-   splat pipelines are GPU-bound (OpenSplat's CPU path is ~100× slower). The
-   silhouette visual hull + fitted-parts approach already in this repo is the
-   only technique surveyed that plausibly fits a 4 GB Chromebook. That is the
-   differentiator to lean on, not a limitation to apologize for.
+1. **OpenMVS is the closest maintained open-source CPU-capable end-to-end
+   pipeline.** Its documented path connects video keyframes, SfM, dense
+   reconstruction, mesh, texture, and GLB, with CUDA optional. It does not,
+   however, demonstrate Spatial's full target intersection: arbitrary handheld
+   monocular object video, faithful rather than generated geometry, 4–8 GB
+   Chromebook operation, Linux x86_64 and aarch64 delivery, permissive
+   commercial integration, and deterministic GLB plus USDZ. Its prebuilt Linux
+   binary is x64, USDZ is not documented, and AGPL plus the bundled
+   research-only IBFS component requires licensing review. COLMAP dense and
+   Meshroom need CUDA; WebODM targets aerial jobs with a larger memory floor;
+   and splat pipelines remain GPU-oriented. Spatial's visual-hull and fitted
+   regularizers therefore remain the practical low-memory fallback, while
+   OpenMVS should be benchmarked externally before integration.
 2. **USDZ without a Mac is solved with ~40 lines of stdlib code.** A pure-Python
    `zipfile` packer (ZIP_STORED, fixed 1980-01-01 DOS timestamps, 64-byte data
    alignment via extra-field padding) was validated this session: byte-identical

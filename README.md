@@ -4,48 +4,57 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
-Spatial is an early-stage, local-first toolkit for turning reviewed object
-videos and images into lightweight GLB/USDZ assets. It includes deterministic
-parametric fitting, fitted soft parts, silhouette visual hulls, a conservative
-shape-family router, and optional native macOS capture helpers.
+Spatial is an early-stage, local-first toolkit for turning object videos and
+reviewed images into auditable GLB/USDZ assets. Its automatic core attempts
+masked structure-from-motion, evidence-backed geometry, and source-view
+texturing, then either promotes the result, selects an explicitly labelled
+regularized fallback, or asks for a recapture. Deterministic parametric, soft
+part, visual-hull, and native macOS helpers are also included.
 
 > [!IMPORTANT]
-> Spatial is not a one-click arbitrary video-to-3D system. Current fitted
-> workflows require reviewed frames, masks, dimensions, or primitive layouts.
-> Geometry and metric scale may be inferred when the capture does not measure
-> them.
+> Spatial is not a universal arbitrary-video scanner. The automatic path is
+> experimental and expects one continuous, mostly static-camera clip of one
+> hand-rotated object. Hands, deformation, reflections, missing viewpoints, and
+> weak texture can force an inferred fallback or `needs_recapture`. Metric scale
+> is unknown unless the capture provides a measurement.
 
 ## What is included
 
 | Path | Status | Learned inference | Repeatability |
 |---|---|---:|---|
+| Evidence-gated video reconstruction | Experimental | Fixed local U2NetP; optional Depth Anything | Seeded/single-threaded; strongest on the pinned platform/toolchain |
 | Parametric phone/book/rounded-slab builder | Stable prototype | None | GLB and USDZ tested byte-for-byte in the reference toolchain |
 | Fitted soft parts and deterministic texture bake | Prototype | None | Deterministic GLB/maps in the reference toolchain |
 | Silhouette visual hull | Prototype | None | Seedless, deterministic geometry |
 | Procedural shape-family router | Review-only | Tiny locally trained NumPy classifier | Seeded training and deterministic inference |
 | Apple Object Capture and Vision helpers | Optional, macOS-only | Apple system frameworks | Platform-dependent |
-| SAM/rembg and Hunyuan adapters | Optional experiments | Yes | Not part of the core guarantee |
+| Standalone SAM and Hunyuan adapters | Optional experiments | Yes | Not part of the core guarantee |
 
-The router never dispatches reconstruction automatically. Unsupported or
-low-confidence inputs fail closed for review.
+The automatic router records the selected geometry class and why every other
+candidate was rejected. Rounded-slab and bilateral soft-volume outputs are
+never reported as recovered photogrammetry.
 
 ## Determinism and LLMs
 
-The core fitted builders have **no LLM, generative-model, API, network, Torch,
-or GPU dependency**. A build consumes local source images plus an explicit
-reviewed JSON configuration. The parametric path fixes OpenCV to one thread,
-disables OpenCL, omits wall-clock metadata, normalizes USDZ ZIP timestamps, and
-records artifact hashes.
+The core automatic and fitted runtime paths call no **LLM, generative model,
+hosted API, or network**. Standalone experimental adapters are outside this
+contract. The automatic video command consumes the video and ordinary CLI
+settings; it does not require object-specific JSON, reviewed frame choices, or
+cached masks, poses, depth, geometry, or textures.
 
-For identical input bytes, configuration, and the pinned reference toolchain,
-the parametric GLB and USDZ rebuild byte-for-byte. Configurations can be written
-manually or with any editor/assistant; build and runtime never call an LLM.
+That command does use fixed, generic learned vision weights: U2NetP for
+foreground masks and, when requested, Depth Anything V2 Small for predicted
+relative depth. These are local computer-vision models, not language models.
+Fallback routing and geometry use deterministic color, silhouette, and shape
+priors, so unseen geometry remains inferred even when every operation is
+repeatable.
 
-That does not make fitting automatic. Choosing frames, quads, masks, primitive
-parts, dimensions, and materials is currently an operator-reviewed step. Also,
-library/encoder upgrades and Apple system-tool changes can alter bytes, so the
-guarantee is intentionally scoped to the reference environment. See
-[Determinism](docs/DETERMINISM.md).
+The reviewed parametric builder has the stronger byte contract: identical input
+bytes, JSON configuration, and pinned reference toolchain rebuild identical GLB
+and USDZ files. The full video pipeline fixes its seed and defaults to one
+matching thread, but codec, ONNX, numeric-library, and pycolmap differences can
+change decisions across machines. Sidecar reports also record elapsed time and
+absolute paths. See [Determinism](docs/DETERMINISM.md) for the exact boundary.
 
 ## Quick start
 
@@ -62,6 +71,22 @@ python -m pip install --upgrade pip
 python -m pip install -e '.[dev]'
 pytest -q
 ```
+
+Install the automatic video dependencies and run a new clip into an empty
+output directory:
+
+```bash
+python -m pip install -e '.[video]'
+
+python scripts/reconstruct_object.py capture.mov \
+  --output runs/capture-001 \
+  --depth-model /absolute/path/depth_anything_v2_small_int8.onnx
+```
+
+`--depth-model` is optional. The pipeline requires `u2netp.onnx` in rembg's
+local model cache (`$U2NET_HOME` or `~/.u2net`) and never downloads missing
+weights implicitly. FFmpeg/ffprobe must be installed separately. Use
+`--match-threads 1`—the default—for the strictest same-machine repeatability.
 
 Run the privacy-safe synthetic phone demo:
 
@@ -127,6 +152,19 @@ artifact hashes, model/depth provenance, and known limits. Metric scale remains
 ambiguous without a reference, hidden surfaces cannot be recovered, deformation
 violates SfM assumptions, and reflective or textureless captures may require a
 better-lit, hands-clear recapture.
+
+#### Clean-room tin check
+
+The current core was tested from the original 355-frame Mac video in an empty
+worktree and run directory, with no object-specific configuration or reused
+intermediates. It freshly sampled 142 reconstruction frames and a separate
+36-frame fallback-evidence stream. The general 19,974-triangle mesh was rejected
+for only 61.64° of camera coverage, 63.54° maximum opposing-view separation,
+four direction bins, and 47.96% directly observed texture surface. The pipeline
+instead selected an 816-triangle watertight rounded slab with observed front and
+back pixels and deterministically inferred thickness. Its stable artifact hashes
+were `ee1a5f59…a526e` (GLB) and `c25f7801…06a54` (USDZ). The private source and
+textured outputs remain intentionally excluded from Git.
 
 ### Parametric assets
 
