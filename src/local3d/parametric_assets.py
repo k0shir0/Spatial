@@ -12,6 +12,8 @@ Configuration schema (paths may be absolute or relative to the JSON file)::
       "schema_version": 1,
       "asset_name": "Example phone",
       "kind": "phone",                         # phone | book
+      "authoring_mode": "reviewed",            # reviewed | automatic
+      "asset_kind": "phone",                   # semantic kind; defaults to kind
       "output_name": "example_phone",
       "front": {
         "image": "front.jpg",
@@ -238,6 +240,18 @@ def load_config(path: Path) -> dict[str, Any]:
     kind = raw.get("kind")
     if kind not in {"phone", "book"}:
         raise ValueError("kind must be 'phone' or 'book'")
+    authoring_mode = raw.get("authoring_mode", "reviewed")
+    if authoring_mode not in {"reviewed", "automatic"}:
+        raise ValueError("authoring_mode must be 'reviewed' or 'automatic'")
+    asset_kind = raw.get("asset_kind", kind)
+    if asset_kind not in {"phone", "book", "rounded_slab"}:
+        raise ValueError("asset_kind must be 'phone', 'book', or 'rounded_slab'")
+    compatible_asset_kinds = {
+        "phone": {"phone", "rounded_slab"},
+        "book": {"book"},
+    }
+    if asset_kind not in compatible_asset_kinds[kind]:
+        raise ValueError(f"asset_kind {asset_kind!r} is incompatible with {kind!r} geometry")
     asset_name = raw.get("asset_name")
     if not isinstance(asset_name, str) or not asset_name.strip():
         raise ValueError("asset_name must be a non-empty string")
@@ -320,6 +334,8 @@ def load_config(path: Path) -> dict[str, Any]:
         "schema_version": 1,
         "asset_name": asset_name.strip(),
         "kind": kind,
+        "authoring_mode": authoring_mode,
+        "asset_kind": asset_kind,
         "output_name": output_name,
         "dimension_basis": dimension_basis.strip(),
         "notes": [note.strip() for note in notes_raw],
@@ -510,9 +526,22 @@ def _normalize_phone(raw: Any, width: float, height: float, depth: float) -> dic
             )
         decorations.append(normalized_decoration)
 
+    seam_raw = raw.get("body_seam")
+    body_seam: dict[str, float] | None = None
+    if seam_raw is not None:
+        if not isinstance(seam_raw, Mapping):
+            raise ValueError("phone.body_seam must be an object")
+        seam_width = _positive(seam_raw.get("width_mm"), "phone.body_seam.width_mm")
+        seam_offset = _finite_number(seam_raw.get("offset_mm", 0.0), "phone.body_seam.offset_mm")
+        if seam_width >= depth * 0.4:
+            raise ValueError("phone.body_seam.width_mm must be smaller than 40% of depth")
+        if abs(seam_offset) + seam_width / 2 >= depth / 2:
+            raise ValueError("phone.body_seam must lie inside the sidewall")
+        body_seam = {"width_mm": seam_width, "offset_mm": seam_offset}
+
     bump = raw.get("camera_bump")
     if bump is None:
-        return {"camera_bump": None, "decorations": decorations}
+        return {"camera_bump": None, "decorations": decorations, "body_seam": body_seam}
     if not isinstance(bump, Mapping):
         raise ValueError("phone.camera_bump must be an object")
     side = bump.get("side", "back")
@@ -625,6 +654,7 @@ def _normalize_phone(raw: Any, width: float, height: float, depth: float) -> dic
             "lenses": lenses,
         },
         "decorations": decorations,
+        "body_seam": body_seam,
     }
 
 
@@ -668,8 +698,13 @@ def rectify_face(
     output_size: tuple[int, int],
     border_rgb: tuple[int, int, int],
     rotate_quarter_turns: int = 0,
+    *,
+    authoring_mode: str = "reviewed",
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Rectify one reviewed quad without any detection or inference."""
+    """Rectify a provided quad and record whether it came from review or automation."""
+
+    if authoring_mode not in {"reviewed", "automatic"}:
+        raise ValueError("authoring_mode must be 'reviewed' or 'automatic'")
 
     source_width, source_height = _source_dimensions(image_path)
     source = _quad(quad_px, "quad_px")
@@ -720,14 +755,23 @@ def rectify_face(
     if rectified.shape[:2] != (height, width):
         raise RuntimeError("rectified texture orientation produced unexpected dimensions")
     del image
+    quad_key = "reviewed_quad_px" if authoring_mode == "reviewed" else "automatic_quad_px"
     metrics = {
         "source_dimensions_px": [source_width, source_height],
-        "reviewed_quad_px": [[round(float(x), 4), round(float(y), 4)] for x, y in source],
+        quad_key: [[round(float(x), 4), round(float(y), 4)] for x, y in source],
         "quad_area_px": round(abs(float(cv2.contourArea(source.reshape(-1, 1, 2)))), 3),
         "texture_dimensions_px": [width, height],
         "rotate_quarter_turns_clockwise": rotate_quarter_turns,
-        "rectification": "manual reviewed quad -> perspective transform",
+        "rectification": (
+            "manual reviewed quad -> perspective transform"
+            if authoring_mode == "reviewed"
+            else "automatic upstream quad -> perspective transform"
+        ),
+        # Legacy field retained for schema compatibility.  This function never
+        # performs detection; automatic callers supply a quad selected upstream.
         "automatic_detection": False,
+        "quad_source": "automatic_upstream" if authoring_mode == "automatic" else "reviewed",
+        "rectifier_performed_detection": False,
     }
     return rectified, metrics
 
@@ -1043,9 +1087,23 @@ def build_phone_parts(
             mirror_u=True,
         ),
         _strip_part("BackBevel", inset, outer, -half_depth, -half_depth + bevel, materials["body"]),
-        _strip_part("BodySide", outer, outer, -half_depth + bevel, half_depth - bevel, materials["body"]),
-        _strip_part("FrontBevel", outer, inset, half_depth - bevel, half_depth, materials["body"]),
     ]
+    side_low = -half_depth + bevel
+    side_high = half_depth - bevel
+    seam = config["phone"].get("body_seam")
+    if seam:
+        seam_center = float(seam["offset_mm"]) * 0.001
+        seam_half = float(seam["width_mm"]) * 0.0005
+        seam_low = max(side_low, seam_center - seam_half)
+        seam_high = min(side_high, seam_center + seam_half)
+        parts.extend([
+            _strip_part("BodySideBack", outer, outer, side_low, seam_low, materials["body"]),
+            _strip_part("BodySeam", outer, outer, seam_low, seam_high, materials["port"]),
+            _strip_part("BodySideFront", outer, outer, seam_high, side_high, materials["body"]),
+        ])
+    else:
+        parts.append(_strip_part("BodySide", outer, outer, side_low, side_high, materials["body"]))
+    parts.append(_strip_part("FrontBevel", outer, inset, half_depth - bevel, half_depth, materials["body"]))
 
     bump = config["phone"].get("camera_bump")
     if bump:
@@ -1648,7 +1706,16 @@ def _texture_card(image: np.ndarray, label: str, size: int = QA_SIZE) -> np.ndar
     return _label(card, label)
 
 
-def write_qa(parts: Sequence[MeshPart], output: Path, front: np.ndarray, back: np.ndarray) -> list[Path]:
+def write_qa(
+    parts: Sequence[MeshPart],
+    output: Path,
+    front: np.ndarray,
+    back: np.ndarray,
+    *,
+    authoring_mode: str = "reviewed",
+) -> list[Path]:
+    if authoring_mode not in {"reviewed", "automatic"}:
+        raise ValueError("authoring_mode must be 'reviewed' or 'automatic'")
     views = [
         ("front three-quarter", (0.48, 0.24, 1.0)),
         ("profile", (1.0, 0.16, 0.10)),
@@ -1659,8 +1726,13 @@ def write_qa(parts: Sequence[MeshPart], output: Path, front: np.ndarray, back: n
     rendered = [_label(render_parts(parts, direction), label) for label, direction in views]
     if not cv2.imwrite(str(model_contact), np.hstack(rendered)):
         raise RuntimeError(f"could not write {model_contact}")
+    texture_labels = (
+        ("reviewed front / rectified", "reviewed back / rectified")
+        if authoring_mode == "reviewed"
+        else ("automatic front / rectified", "automatic back / rectified")
+    )
     texture_cards = np.hstack(
-        (_texture_card(front, "reviewed front / rectified"), _texture_card(back, "reviewed back / rectified"))
+        (_texture_card(front, texture_labels[0]), _texture_card(back, texture_labels[1]))
     )
     if not cv2.imwrite(str(texture_contact), texture_cards):
         raise RuntimeError(f"could not write {texture_contact}")
@@ -1692,6 +1764,8 @@ def build_asset(config_path: Path, output: Path, allow_usdz: bool = True) -> dic
     except AttributeError:
         pass
     config = load_config(config_path)
+    authoring_mode = str(config["authoring_mode"])
+    automatic_authoring = authoring_mode == "automatic"
     output = output.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     if not output.is_dir():
@@ -1712,6 +1786,7 @@ def build_asset(config_path: Path, output: Path, allow_usdz: bool = True) -> dic
         texture_dimensions,
         materials["front" if config["kind"] == "phone" else "cover"].color_rgb,
         int(config["front"]["rotate_quarter_turns"]),
+        authoring_mode=authoring_mode,
     )
     back_texture, back_metrics = rectify_face(
         back_path,
@@ -1719,6 +1794,7 @@ def build_asset(config_path: Path, output: Path, allow_usdz: bool = True) -> dic
         texture_dimensions,
         materials["back" if config["kind"] == "phone" else "cover"].color_rgb,
         int(config["back"]["rotate_quarter_turns"]),
+        authoring_mode=authoring_mode,
     )
 
     front_texture_path = output / "front_rectified.png"
@@ -1727,8 +1803,9 @@ def build_asset(config_path: Path, output: Path, allow_usdz: bool = True) -> dic
         raise RuntimeError(f"could not write {front_texture_path}")
     if not cv2.imwrite(str(back_texture_path), back_texture):
         raise RuntimeError(f"could not write {back_texture_path}")
-    front_quad_review = output / "front_quad_review.png"
-    back_quad_review = output / "back_quad_review.png"
+    quad_suffix = "quad_overlay" if automatic_authoring else "quad_review"
+    front_quad_review = output / f"front_{quad_suffix}.png"
+    back_quad_review = output / f"back_{quad_suffix}.png"
     write_quad_review(front_path, config["front"]["quad_px"], front_quad_review)
     write_quad_review(back_path, config["back"]["quad_px"], back_quad_review)
     texture_paths = {"front": front_texture_path, "back": back_texture_path}
@@ -1751,7 +1828,13 @@ def build_asset(config_path: Path, output: Path, allow_usdz: bool = True) -> dic
     export_glb(parts, glb_path, texture_paths, base_name)
     author_usda(parts, usda_path, texture_paths, base_name)
     usdz_report = package_usdz_if_available(usda_path, usdz_path, enabled=allow_usdz)
-    qa_paths = write_qa(parts, output, front_texture, back_texture)
+    qa_paths = write_qa(
+        parts,
+        output,
+        front_texture,
+        back_texture,
+        authoring_mode=authoring_mode,
+    )
 
     resolved_config_path = output / "resolved_config.json"
     resolved_config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
@@ -1773,13 +1856,30 @@ def build_asset(config_path: Path, output: Path, allow_usdz: bool = True) -> dic
         "created_utc": None,
         "created_utc_policy": "omitted so identical inputs produce an identical manifest",
         "asset_name": config["asset_name"],
-        "asset_kind": config["kind"],
-        "method": "manual quad rectification + deterministic parametric geometry",
+        "asset_kind": config["asset_kind"],
+        "geometry_template": config["kind"],
+        "authoring_mode": authoring_mode,
+        "method": (
+            "automatic source selection/rectification + deterministic parametric geometry"
+            if automatic_authoring
+            else "manual quad rectification + deterministic parametric geometry"
+        ),
         "method_limit": (
-            "This is a parametric approximation, not photogrammetry or recovered depth. "
-            "Metric dimensions, reviewed quads, and requested materials come from the config."
+            (
+                "This is an automatically normalized parametric approximation, not "
+                "photogrammetry or recovered depth. Face width is normalized to "
+                f"{float(dimensions['width']):g} builder mm; no physical scale is inferred. "
+                "Observed face pixels may include automatic mask/skin cleanup and body-color "
+                "fill; material response and unobserved surfaces use deterministic priors."
+            )
+            if automatic_authoring
+            else (
+                "This is a parametric approximation, not photogrammetry or recovered depth. "
+                "Metric dimensions, reviewed quads, and requested materials come from the config."
+            )
         ),
         "execution": {
+            "scope": "parametric builder only; upstream selection, segmentation, and source preparation excluded",
             "local_only": True,
             "cpu_only": True,
             "network_access": False,
@@ -1804,9 +1904,23 @@ def build_asset(config_path: Path, output: Path, allow_usdz: bool = True) -> dic
             "output_rotation_deg_xyz": config["output_rotation_deg"],
         },
         "geometry": {
-            "classification": "parametric / manually configured",
+            "classification": (
+                "parametric / automatically inferred relative fit"
+                if automatic_authoring
+                else "parametric / manually configured"
+            ),
             "dimension_basis": config["dimension_basis"],
             "dimensions_mm": dimensions,
+            **(
+                {
+                    "physical_scale_inferred": False,
+                    "dimension_normalization": (
+                        f"face width = {float(dimensions['width']):g} builder mm"
+                    ),
+                }
+                if automatic_authoring
+                else {}
+            ),
             "topology": topology,
             "materials": config["materials"],
             "phone": config.get("phone"),
@@ -1816,9 +1930,18 @@ def build_asset(config_path: Path, output: Path, allow_usdz: bool = True) -> dic
         "appearance": {
             "front": {
                 "classification": (
-                    "observed pixels, manually reviewed quad"
+                    (
+                        "observed pixels with automatic selection, rectification, mask/skin cleanup, "
+                        "and body-color fill"
+                        if automatic_authoring
+                        else "observed pixels, manually reviewed quad"
+                    )
                     if config["front"]["texture_mode"] == "source"
-                    else "configured material; reviewed source retained for QA only"
+                    else (
+                        "configured material; automatic source retained for QA only"
+                        if automatic_authoring
+                        else "configured material; reviewed source retained for QA only"
+                    )
                 ),
                 "texture_mode": config["front"]["texture_mode"],
                 "source_image": str(front_path),
@@ -1827,9 +1950,18 @@ def build_asset(config_path: Path, output: Path, allow_usdz: bool = True) -> dic
             },
             "back": {
                 "classification": (
-                    "observed pixels, manually reviewed quad"
+                    (
+                        "observed pixels with automatic selection, rectification, mask/skin cleanup, "
+                        "and body-color fill"
+                        if automatic_authoring
+                        else "observed pixels, manually reviewed quad"
+                    )
                     if config["back"]["texture_mode"] == "source"
-                    else "configured material; reviewed source retained for QA only"
+                    else (
+                        "configured material; automatic source retained for QA only"
+                        if automatic_authoring
+                        else "configured material; reviewed source retained for QA only"
+                    )
                 ),
                 "texture_mode": config["back"]["texture_mode"],
                 "source_image": str(back_path),
@@ -1837,7 +1969,9 @@ def build_asset(config_path: Path, output: Path, allow_usdz: bool = True) -> dic
                 **back_metrics,
             },
             "unobserved_surfaces": (
-                "Uniform configured materials only; no generative filling or invented texture detail."
+                "Uniform deterministic material priors only; no generative filling or invented texture detail."
+                if automatic_authoring
+                else "Uniform configured materials only; no generative filling or invented texture detail."
             ),
         },
         "usd_package": usdz_report,
