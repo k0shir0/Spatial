@@ -50,7 +50,8 @@ guarantee is intentionally scoped to the reference environment. See
 ## Quick start
 
 Python 3.10 or newer is required. FFmpeg/ffprobe is needed only for video
-ingest. Apple USD tools are optional; on other platforms use `--skip-usdz`.
+ingest. USDZ packaging is pure Python and works on every platform; Apple's
+`usdchecker` adds an extra validation pass when present on macOS.
 
 ```bash
 git clone https://github.com/JustinGamer191/Spatial.git
@@ -68,13 +69,13 @@ Run the privacy-safe synthetic phone demo:
 python scripts/make_demo_inputs.py --output examples/demo
 spatial-parametric \
   --config examples/parametric_phone.json \
-  --output examples/output \
-  --skip-usdz
+  --output examples/output
 ```
 
-The output includes a GLB, USDA, provenance manifest, reviewed-quad overlays,
-and CPU-only QA contact sheets. On macOS, omit `--skip-usdz` to package and
-validate an Apple USDZ when the system tools are available.
+The output includes a GLB, USDA, a deterministically packaged USDZ,
+provenance manifest, reviewed-quad overlays, and CPU-only QA contact sheets.
+`--skip-usdz` remains available to skip packaging entirely; on macOS the
+system `usdchecker` also validates the USDZ when present.
 
 For the exact versions used by the repeatability checks:
 
@@ -108,6 +109,25 @@ triangles.
   silhouettes.
 
 See [Lightweight plush reconstruction](PLUSH_RECONSTRUCTION.md).
+
+### Board-based capture (recommended)
+
+Print a ChArUco board (`scripts/make_charuco_board.py`), capture per
+[the capture protocol](docs/CAPTURE.md), and select keyframes by measured
+orbit coverage with `scripts/select_board_frames.py`. Poses, frame selection,
+and gating are classical OpenCV — deterministic and zero-ML. `spatial-ingest
+--segmenter u2netp` optionally scores subject coverage with a small local CV
+segmenter instead of the temporal-change heuristic.
+
+### Masked SfM reconstruction (experimental)
+
+`scripts/masked_sfm_hull.py` reconstructs a handheld rotating object from an
+ordinary clip: object masks restrict classical CPU SIFT to the object, a
+seeded COLMAP mapper recovers object-relative poses, and geometry is the
+intersection of the triangulated-point convex hull with silhouette carving.
+Every candidate pose model is validated by reprojection IoU against the
+masks and the build fails closed below the acceptance gate. Output scale is
+ambiguous and concavities are not recovered. Requires the `sfm` extra.
 
 ### Shape routing
 

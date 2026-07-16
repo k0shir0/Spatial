@@ -331,27 +331,20 @@ class ParametricAssetTests(unittest.TestCase):
             (self.root / "repeat-b" / "test_phone.glb").read_bytes(),
         )
 
-    @unittest.skipUnless(
-        Path("/usr/bin/usdcat").is_file() and Path("/usr/bin/usdzip").is_file(),
-        "Apple USD command-line tools are unavailable",
-    )
-    def test_apple_usdz_package_contains_both_textures(self) -> None:
+    def test_usdz_package_contains_both_textures(self) -> None:
         config = self.write_config(self.book_config())
         output = self.root / "usdz"
         manifest = build_asset(config, output, allow_usdz=True)
         self.assertTrue(manifest["usd_package"]["created"])
         self.assertTrue((output / "test_book.usdz").is_file())
+        self.assertTrue(manifest["usd_package"]["layout"]["passed"])
         if Path("/usr/bin/usdchecker").is_file():
             self.assertTrue(manifest["usd_package"]["validation"]["passed"])
         listing = "\n".join(manifest["usd_package"]["archive_entries"])
         self.assertIn("front_rectified.png", listing)
         self.assertIn("back_rectified.png", listing)
 
-    @unittest.skipUnless(
-        Path("/usr/bin/usdcat").is_file() and Path("/usr/bin/usdzip").is_file(),
-        "Apple USD command-line tools are unavailable",
-    )
-    def test_apple_usdz_package_is_byte_repeatable(self) -> None:
+    def test_usdz_package_is_byte_repeatable(self) -> None:
         config = self.write_config(self.phone_config())
         first = self.root / "usdz-repeat-a"
         second = self.root / "usdz-repeat-b"

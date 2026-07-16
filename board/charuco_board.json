@@ -1,0 +1,12 @@
+{
+  "output": "board/charuco_board.png",
+  "board": {
+    "squares_x": 7,
+    "squares_y": 5,
+    "square_mm": 30.0,
+    "marker_mm": 22.0,
+    "dictionary": "DICT_4X4_100"
+  },
+  "dpi": 300,
+  "print_instructions": "Print at 100% scale (300 DPI). Verify with a ruler: each square must measure 30 mm. Tape the sheet flat; any curl bends the recovered poses."
+}

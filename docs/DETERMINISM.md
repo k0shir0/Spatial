@@ -15,7 +15,8 @@ The implementation:
 - uses fixed reviewed quads and configured geometry without automatic fitting;
 - caps source size, texture resolution, and triangle count;
 - validates watertight/winding-consistent topology;
-- normalizes Apple-authored ZIP timestamps without repacking USDZ data; and
+- packages USDZ with a pure-Python writer that stores entries uncompressed,
+  64-byte aligned, with DOS-epoch timestamps, on every platform; and
 - hashes every emitted artifact in a provenance manifest.
 
 Regression tests rebuild GLB and USDZ in independent directories and compare
@@ -24,9 +25,9 @@ their bytes.
 ## Reference toolchain
 
 The pinned versions are recorded in `requirements/reference.txt`. The checked
-reference environment uses Python 3.10.16. Apple USDZ packaging additionally
-depends on the `/usr/bin/usdcat`, `/usr/bin/usdzip`, and `/usr/bin/usdchecker`
-versions supplied by macOS.
+reference environment uses Python 3.10.16. USDZ packaging is pure Python and
+platform-independent; when macOS supplies `/usr/bin/usdchecker`, it runs as an
+extra ARKit-compliance validation pass but is not required to build.
 
 Changing Python packages, image codecs, CPU architecture, or Apple system tools
 may change bytes without changing visible geometry. A manifest also records
