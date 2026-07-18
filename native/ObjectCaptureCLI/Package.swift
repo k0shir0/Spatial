@@ -14,6 +14,11 @@ let package = Package(
         .executableTarget(
             name: "ObjectCaptureCLI",
             path: "Sources"
+        ),
+        .testTarget(
+            name: "ObjectCaptureCLITests",
+            dependencies: ["ObjectCaptureCLI"],
+            path: "Tests"
         )
     ],
     swiftLanguageModes: [.v5]
