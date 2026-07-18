@@ -42,3 +42,22 @@ jobs:
           spatial-parametric --config examples/parametric_phone.json --output /tmp/spatial-b --skip-usdz
           cmp /tmp/spatial-a/spatial_demo_phone.glb /tmp/spatial-b/spatial_demo_phone.glb
           cmp /tmp/spatial-a/manifest.json /tmp/spatial-b/manifest.json
+
+  native-swift:
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [ObjectCaptureCLI, VisionClassifyCLI, VisionMaskCLI]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: swift build --package-path native/${{ matrix.package }}
+
+      - name: Test (where a test target exists)
+        run: |
+          if [ -d "native/${{ matrix.package }}/Tests" ]; then
+            swift test --package-path native/${{ matrix.package }}
+          fi
