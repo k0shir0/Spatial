@@ -8,8 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-from src.local3d.backends import write_glb_material_parts, write_glb_mesh
-from src.local3d.soft_parts import combine_parts, ellipsoid_mesh, superellipsoid_mesh, tube_mesh
+from local3d.backends import write_glb_material_parts, write_glb_mesh
+from local3d.soft_parts import combine_parts, ellipsoid_mesh, superellipsoid_mesh, tube_mesh
 
 
 def parse_glb(path: Path) -> tuple[dict, bytes]:

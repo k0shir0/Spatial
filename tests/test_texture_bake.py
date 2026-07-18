@@ -9,9 +9,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from src.local3d.gltf_texture import TexturedMeshPart, write_textured_glb
-from src.local3d.soft_parts import ellipsoid_mesh, tube_mesh
-from src.local3d.texture_bake import (
+from local3d.gltf_texture import TexturedMeshPart, write_textured_glb
+from local3d.soft_parts import ellipsoid_mesh, tube_mesh
+from local3d.texture_bake import (
     BaseMeshPart,
     _encode_image,
     _gltf_uvs_to_usd,
