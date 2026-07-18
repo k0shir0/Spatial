@@ -29,7 +29,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10"]
+dev = ["pytest>=8,<10", "ruff>=0.15,<1"]
 segmentation = ["rembg>=2,<3", "onnxruntime>=1.20,<2", "scipy>=1.11,<2"]
 mesh = ["fast-simplification>=0.1.13,<1", "manifold3d>=3,<4"]
 sfm = ["pycolmap>=4.1,<5", "scipy>=1.11,<2"]
@@ -59,3 +59,11 @@ include = ["local3d*"]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
 addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint.per-file-ignores]
+# Tests and scripts bootstrap sys.path before importing local3d.
+"tests/*" = ["E402"]
+"scripts/*" = ["E402"]

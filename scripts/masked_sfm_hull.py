@@ -172,11 +172,13 @@ def render_qa_views(vertices: np.ndarray, faces: np.ndarray, output: Path, size:
     iso = np.array([1.0, 1.0, 1.0]) / np.sqrt(3.0)
     tiles = []
     center = (vertices.min(axis=0) + vertices.max(axis=0)) / 2.0
-    light = np.array([-0.4, 0.6, 1.0]); light /= np.linalg.norm(light)
+    light = np.array([-0.4, 0.6, 1.0])
+    light /= np.linalg.norm(light)
     for name, basis in directions.items():
         if basis is None:
             forward = iso
-            right = np.cross([0.0, 1.0, 0.0], forward); right /= np.linalg.norm(right)
+            right = np.cross([0.0, 1.0, 0.0], forward)
+            right /= np.linalg.norm(right)
             up = np.cross(forward, right)
             basis = np.stack((right, up, forward))
         projected = (vertices - center) @ basis.T

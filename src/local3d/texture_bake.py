@@ -12,7 +12,6 @@ import hashlib
 import json
 import math
 import shutil
-import struct
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
