@@ -29,7 +29,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "ruff>=0.15,<1"]
+dev = ["pytest>=8,<10", "ruff>=0.15,<1", "mypy>=2,<3"]
 segmentation = ["rembg>=2,<3", "onnxruntime>=1.20,<2", "scipy>=1.11,<2"]
 mesh = ["fast-simplification>=0.1.13,<1", "manifold3d>=3,<4"]
 sfm = ["pycolmap>=4.1,<5", "scipy>=1.11,<2"]
@@ -67,3 +67,35 @@ line-length = 120
 # Tests and scripts bootstrap sys.path before importing local3d.
 "tests/*" = ["E402"]
 "scripts/*" = ["E402"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+
+# Baseline adoption: these modules predate type checking and currently fail on
+# strict numpy/OpenCV signatures. Trim this list as modules get cleaned up.
+[[tool.mypy.overrides]]
+module = [
+  "local3d.auto_parametric",
+  "local3d.auto_soft",
+  "local3d.charuco_pose",
+  "local3d.core",
+  "local3d.depth_backends",
+  "local3d.depth_consistency",
+  "local3d.fusion",
+  "local3d.ingest",
+  "local3d.mask_clean",
+  "local3d.masking",
+  "local3d.monodepth",
+  "local3d.parametric_assets",
+  "local3d.pose_complete",
+  "local3d.qa_render",
+  "local3d.reconstruction_gate",
+  "local3d.sfm_video",
+  "local3d.shape_router",
+  "local3d.source_guard",
+  "local3d.texture_bake",
+  "local3d.texturing",
+  "local3d.turntable_pose",
+]
+ignore_errors = true
